@@ -1,0 +1,4 @@
+# build output (binary lives in ~/bin/netgov)
+/netgov
+*.o
+*.test
