@@ -526,6 +526,7 @@ small{color:var(--mut)}
 <span class="mut">SSID</span><input id="pssid" placeholder="e.g. Motionlab-Member" size="17"><span class="mut">on</span><select id="pssidif" title="Wi-Fi uplink to scan"></select>
 <span class="mut">AP on</span><select id="pap" multiple size="2" style="min-width:74px" title="access points to keep up"></select>
 <textarea id="prules" rows="3" cols="26" placeholder="rules, one per line:&#10;api.anthropic.com WiFi0&#10;from:172.18.0.0/16 cable"></textarea>
+<button onclick="patSnapshot()" title="fill v4/v6/rules + active AP from the CURRENT live config">↧ snapshot current</button>
 <button onclick="patSave()">+ save</button></div>
 <small style="display:block;padding:2px 14px 10px">trigger = required uplinks UP <i>and</i> (optional) an SSID in range on the chosen Wi-Fi. Uplink details live in NetworkManager / OS settings; APs in the card above. A “floor” fallback is auto-added. Click <b>edit</b> on a row to load it here.</small></section>
 
@@ -588,6 +589,12 @@ async function patSave(){if(!$('#pn').value){alert('name required');return}
  let rq=[...$('#prq').selectedOptions].map(o=>o.value).join(',');
  let ap=[...$('#pap').selectedOptions].map(o=>o.value).join(',');
  S=await post('/api/pattern',{action:'set',name:$('#pn').value,priority:$('#pp').value||'50',require:rq,ssid:$('#pssid').value,ssid_iface:$('#pssidif').value,aps:ap,v4:$('#pv4').value,v6:$('#pv6').value,rules:$('#prules').value});render();$('#pn').value='';$('#prules').value='';$('#pssid').value=''}
+function patSnapshot(){ // fill the builder's egress fields from the CURRENT live config
+ $('#pv4').innerHTML=ulOpts(S.default_v4||'direct',[['direct','direct'],['block','block']]);
+ $('#pv6').innerHTML=ulOpts(S.default_v6||'block',[['direct','direct'],['block','block']]);
+ $('#prules').value=(S.rules||[]).filter(r=>r.sel).map(r=>(r.kind==='src'?'from:'+r.sel:r.sel)+' '+r.via+' '+(r.fam||'both')).join('\n');
+ [...$('#pap').options].forEach(o=>o.selected=(S.aps||[]).some(a=>a.dev===o.value&&a.active));
+ log('snapshotted current egress into the builder — add a name + trigger, then + save')}
 async function patDel(n){if(confirm('delete pattern '+n+'?')){S=await post('/api/pattern',{action:'del',name:n});render()}}
 async function patApply(n){log('activating '+n+'… (approve the sudo dialog)');const r=await post('/api/pattern',{action:'apply',name:n});log(r.out||'done');if(r.state){S=r.state;render()}else load()}
 function patEdit(n){const p=(S.patterns||[]).find(x=>x.name===n);if(!p)return;
