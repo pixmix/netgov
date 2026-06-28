@@ -32,9 +32,14 @@ prevent leaks.
 - **Access Point** — optionally turn a Wi-Fi interface into a shared AP
   (NetworkManager `ipv4.method shared`: DHCP + NAT); clients egress via the host
   default and inherit your rules.
-- **Lifeline pattern** — a destination pinned to a stable uplink so it stays on a
+- **Lifeline pin** — a destination pinned to a stable uplink so it stays on a
   known-good path regardless of the overall default (just an ordinary rule, e.g.
   `netgov rule add --domain example.com --via wifi`).
+- **Pattern** — a named, prioritised snapshot of egress policy (`v4`/`v6` default +
+  rules) with `require`-uplink criteria. You can switch patterns by hand, or **arm** a
+  background failover loop that auto-selects the highest-priority pattern whose required
+  uplinks are live and whose default actually reaches the internet (poll-validate +
+  debounce), falling back to an always-reachable `floor`. See below.
 
 RFC1918 / link-local traffic always stays on the main table (local LANs keep
 working). IPv6 defaults to `block` when the host has no global IPv6 (leak-protect).
@@ -92,7 +97,38 @@ netgov ap list
 
 netgov link up|down|reapply <iface>
 netgov web                         # serve the dashboard (localhost)
+
+# patterns / automatic failover
+netgov pat-list
+netgov pat-set <name> <prio> [--require a,b] [--v4 <uplink|block|direct>] [--v6 ...] [--snapshot] [--floor]
+netgov pat-del <name>
+netgov pat-apply <name>            # manually switch to a pattern (root)
+netgov eval [--apply]              # pick the best satisfiable pattern (dry, or apply)
+netgov arm [--dry] | disarm        # background failover loop (root service); boots disarmed
 ```
+
+## Patterns & automatic failover
+
+A **pattern** captures a complete egress policy under a name + priority, with
+`require`d uplinks as its satisfiability criteria. Build one from the current live
+config with `--snapshot`, or set fields explicitly:
+
+```sh
+netgov pat-set home 80 --require cable --v4 cable --v6 block
+netgov pat-set roaming 60 --require wifi --v4 wifi --v6 block
+netgov pat-apply home              # switch now
+```
+
+`netgov arm` enables a **root systemd service** (`netgov-roled.service`, installed by
+`netgov install`) that runs a failover loop: it keeps the active pattern's internet
+healthy and, on a *sustained* outage (debounced, so a transient blip won't thrash),
+re-evaluates and activates the highest-priority pattern whose required uplinks are live
+and whose default validates internet — else an always-reachable `floor` (added
+automatically). `netgov arm --dry` only logs what it *would* do (`journalctl -u
+netgov-roled`); `netgov disarm` stops it. It **boots disarmed**.
+
+Patterns are saved policy + criteria; they reuse the same safe apply engine, so
+`netgov disarm` + `netgov reset` always returns you to a pure NetworkManager baseline.
 
 ### Example
 
