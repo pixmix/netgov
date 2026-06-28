@@ -151,8 +151,11 @@ netgov apply
 
 `netgov web` (or the `netgov install` service) serves a localhost-only dashboard
 that mirrors the CLI: cards for uplinks, destination/source rules, the per-family
-default, and access points, with live status. Bind address is configurable; keep
-it on loopback unless you intend otherwise.
+default, access points, and patterns, with live status. Bind address is
+configurable; keep it on loopback unless you intend otherwise.
+
+**Full UI walkthrough: [docs/UI.md](docs/UI.md)** (also on the
+[project wiki](https://github.com/pixmix/netgov/wiki)).
 
 ## State
 
