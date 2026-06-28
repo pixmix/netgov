@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,14 @@ import (
 	"strconv"
 	"strings"
 )
+
+// In-app help: the repo docs are embedded so /help is self-contained in the binary.
+//
+//go:embed docs/UI.md
+var uiHelpMD string
+
+//go:embed docs/CLI.md
+var cliHelpMD string
 
 type famView struct {
 	Up       bool   `json:"up"`
@@ -171,8 +180,20 @@ func cmdWeb(st *State, args []string) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(pageHTML))
+	})
+	mux.HandleFunc("/help", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(helpHTML))
+	})
+	mux.HandleFunc("/api/help", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(uiHelpMD + "\n\n---\n\n" + cliHelpMD))
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, buildView()) })
 
@@ -513,7 +534,8 @@ small{color:var(--mut)}
 </style></head><body>
 <header><h1>NETGOV</h1><span class="mut" id="sub">host switchboard</span>
 <span style="flex:1"></span><button class="go" onclick="apply()">APPLY ▸</button>
-<button onclick="load()" title="refresh status">↻ refresh</button></header>
+<button onclick="load()" title="refresh status">↻ refresh</button>
+<a href="/help" target="_blank" title="open the help page" style="color:var(--mut);border:1px solid var(--ln);border-radius:4px;padding:3px 10px;text-decoration:none;margin-left:6px">? help</a></header>
 <main>
 <section><h2>Uplinks</h2><table id="ut"><thead><tr><th>name</th><th>iface</th>
 <th>IPv4</th><th>IPv6</th><th>tbl</th><th></th></tr></thead><tbody></tbody></table>
@@ -640,4 +662,56 @@ async function apply(){log('applying… (approve the sudo dialog on screen)');co
 async function reset(){if(!confirm('Remove ALL netgov rules and restore the NetworkManager baseline?'))return;log('restoring…');const r=await post('/api/reset',{});log(r.out||'done');load()}
 load();
 setInterval(()=>{const a=document.activeElement;if(a&&/^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName))return;load()},15000);
+</script></body></html>`
+
+// helpHTML renders the embedded docs (UI.md + CLI.md) with a tiny client-side markdown
+// converter (stdlib-only: no server-side renderer). Backticks are written as ` so
+// this stays a valid Go raw string.
+const helpHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>netgov · help</title><style>
+:root{--bg:#0e0f12;--fg:#d7dae0;--mut:#7a8290;--ln:#2a2e36;--ok:#5fd68a;--no:#e06c75;--acc:#6fb3ff;--warn:#e5a24a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.65 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:14px 20px;border-bottom:1px solid var(--ln);display:flex;align-items:center;gap:14px;position:sticky;top:0;background:var(--bg);z-index:1}
+h1{font-size:14px;font-weight:600;letter-spacing:.08em;margin:0}
+a{color:var(--acc)}
+main{max-width:820px;margin:0 auto;padding:8px 22px 60px}
+#md h1{font-size:22px;border-bottom:1px solid var(--ln);padding-bottom:.3em;margin:1.5em 0 .6em}
+#md h2{font-size:17px;color:var(--acc);margin:1.9em 0 .5em;border-bottom:1px solid var(--ln);padding-bottom:.2em}
+#md h3{font-size:15px;margin:1.4em 0 .4em}
+#md code{background:#16181d;border:1px solid var(--ln);border-radius:4px;padding:1px 5px;font:12.5px ui-monospace,Menlo,Consolas,monospace}
+#md pre{background:#16181d;border:1px solid var(--ln);border-radius:6px;padding:12px 14px;overflow:auto}
+#md pre code{background:none;border:none;padding:0}
+#md blockquote{border-left:3px solid var(--warn);margin:1em 0;padding:.3em 14px;color:var(--mut)}
+#md table{border-collapse:collapse;margin:1em 0;width:100%}
+#md th,#md td{border:1px solid var(--ln);padding:6px 10px;text-align:left}
+#md th{color:var(--mut)}
+#md hr{border:none;border-top:1px solid var(--ln);margin:1.8em 0}
+#md ul,#md ol{padding-left:1.4em}#md li{margin:.2em 0}
+.back{color:var(--mut);border:1px solid var(--ln);border-radius:4px;padding:3px 10px;text-decoration:none}.back:hover{border-color:var(--acc);color:var(--acc)}
+</style></head><body>
+<header><h1>NETGOV · HELP</h1><span style="flex:1"></span><a class="back" href="/">← dashboard</a></header>
+<main><div id="md">loading…</div></main>
+<script>
+const BT='\u0060',BT3=BT+BT+BT,codeRe=new RegExp(BT+'([^'+BT+']+)'+BT,'g');
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function inl(s){return esc(s).replace(codeRe,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/\*([^*]+)\*/g,'<em>$1</em>').replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target="_blank">$1</a>')}
+function cells(r){return r.split('|').slice(1,-1).map(c=>c.trim())}
+function md2html(md){const L=md.split('\n');let o=[],i=0;
+ while(i<L.length){let ln=L[i];
+  if(ln.slice(0,3)===BT3){let c=[];i++;while(i<L.length&&L[i].slice(0,3)!==BT3){c.push(esc(L[i]));i++}i++;o.push('<pre><code>'+c.join('\n')+'</code></pre>');continue}
+  if(ln.startsWith('### ')){o.push('<h3>'+inl(ln.slice(4))+'</h3>');i++;continue}
+  if(ln.startsWith('## ')){o.push('<h2>'+inl(ln.slice(3))+'</h2>');i++;continue}
+  if(ln.startsWith('# ')){o.push('<h1>'+inl(ln.slice(2))+'</h1>');i++;continue}
+  if(ln.startsWith('> ')){let q=[];while(i<L.length&&L[i].startsWith('> ')){q.push(inl(L[i].slice(2)));i++}o.push('<blockquote>'+q.join(' ')+'</blockquote>');continue}
+  if(/^---+\s*$/.test(ln)){o.push('<hr>');i++;continue}
+  if(ln.startsWith('|')){let rows=[];while(i<L.length&&L[i].startsWith('|')){rows.push(L[i]);i++}
+   let h=cells(rows[0]),b=rows.slice(2),t='<table><thead><tr>'+h.map(x=>'<th>'+inl(x)+'</th>').join('')+'</tr></thead><tbody>';
+   b.forEach(r=>{t+='<tr>'+cells(r).map(c=>'<td>'+inl(c)+'</td>').join('')+'</tr>'});o.push(t+'</tbody></table>');continue}
+  if(/^\s*[-*] /.test(ln)){let it=[];while(i<L.length&&/^\s*[-*] /.test(L[i])){it.push('<li>'+inl(L[i].replace(/^\s*[-*] /,''))+'</li>');i++}o.push('<ul>'+it.join('')+'</ul>');continue}
+  if(/^\s*\d+\. /.test(ln)){let it=[];while(i<L.length&&/^\s*\d+\. /.test(L[i])){it.push('<li>'+inl(L[i].replace(/^\s*\d+\. /,''))+'</li>');i++}o.push('<ol>'+it.join('')+'</ol>');continue}
+  if(ln.trim()===''){i++;continue}
+  let p=[];while(i<L.length&&L[i].trim()!==''&&!/^(#|>|\||---|\s*[-*] |\s*\d+\. )/.test(L[i])&&L[i].slice(0,3)!==BT3){p.push(inl(L[i]));i++}
+  o.push('<p>'+p.join(' ')+'</p>')}
+ return o.join('\n')}
+fetch('/api/help').then(r=>r.text()).then(t=>{document.getElementById('md').innerHTML=md2html(t)}).catch(e=>{document.getElementById('md').textContent='failed to load help: '+e});
 </script></body></html>`
