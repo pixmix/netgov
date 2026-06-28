@@ -316,13 +316,13 @@ small{color:var(--mut)}
 
 <section><h2>Access points — WiFi interface → AP (shadows its uplink)</h2>
 <table id="at"><tbody></tbody></table>
-<div class="row"><select id="aif"></select><input id="assid" placeholder="SSID" size="10" value="CNNet">
+<div class="row"><select id="aif"></select><input id="assid" placeholder="SSID e.g. myhotspot" size="14">
 <input id="apsk" placeholder="passphrase" size="14">
 <select id="aband"><option value="bg">2.4GHz</option><option value="a">5GHz</option></select>
 <button onclick="apOn()">+ enable AP</button></div></section>
 
 <section><h2>Destination rules — domain → uplink</h2><table id="rt"><tbody></tbody></table>
-<div class="row"><input id="rd" placeholder="domain e.g. api.anthropic.com" size="26"><span class="mut">→</span>
+<div class="row"><input id="rd" placeholder="domain e.g. example.com" size="26"><span class="mut">→</span>
 <select id="rv"></select><select id="rf"></select><button onclick="addDest()">+ pin</button></div></section>
 
 <section><h2>Source rules — containers / VMs / subnet → uplink</h2><table id="st"><tbody></tbody></table>

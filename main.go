@@ -133,7 +133,20 @@ func homeDir() string {
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
 		return h
 	}
-	return "/home/pm"
+	if h := os.Getenv("HOME"); h != "" {
+		return h
+	}
+	return "."
+}
+
+// askpassEnv builds the environment for a `sudo -A` re-exec. It honours a pre-set
+// SUDO_ASKPASS (any askpass helper works), otherwise defaults to the common
+// ~/bin/sudo-askpass-zenity convention. Set SUDO_ASKPASS or run as root to override.
+func askpassEnv() []string {
+	if os.Getenv("SUDO_ASKPASS") != "" {
+		return os.Environ()
+	}
+	return append(os.Environ(), "SUDO_ASKPASS="+filepath.Join(homeDir(), "bin", "sudo-askpass-zenity"))
 }
 
 func statePath() string {
@@ -511,7 +524,7 @@ func resetRoot(st *State) {
 func sudoSelf(verb string) {
 	self, _ := os.Executable()
 	cmd := exec.Command("sudo", "-A", self, verb, "--state", statePath())
-	cmd.Env = append(os.Environ(), "SUDO_ASKPASS="+filepath.Join(homeDir(), "bin", "sudo-askpass-zenity"))
+	cmd.Env = askpassEnv()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, verb, "failed:", err)
@@ -608,7 +621,7 @@ func devBaseName(dev string) string {
 	case strings.HasPrefix(dev, "wlx"):
 		return "dongle"
 	case strings.HasPrefix(dev, "wl"):
-		return "cic"
+		return "wifi"
 	case isUSB(dev):
 		return "tether"
 	default:
@@ -773,7 +786,7 @@ func cmdInit(st *State) {
 		case strings.HasPrefix(dev, "wlx"):
 			name = "dongle"
 		case strings.HasPrefix(dev, "wl"):
-			name = "cic"
+			name = "wifi"
 		case isUSB(dev):
 			name = "tether"
 		default:
@@ -785,12 +798,10 @@ func cmdInit(st *State) {
 		fmt.Printf("uplink + %-8s dev=%s table=%d\n", name, dev, u.Table)
 	}
 	if len(st.Rules) == 0 {
-		if upByName(st, "cic") != nil {
-			st.Rules = append(st.Rules,
-				Rule{Domain: "api.anthropic.com", Via: "cic", Fam: "both"},
-				Rule{Domain: "claude.ai", Via: "cic", Fam: "both"})
-			fmt.Println("rule  + api.anthropic.com,claude.ai via cic (lifeline)")
-		}
+		// "Lifeline" idea: pin a critical destination to a stable uplink so it stays on a
+		// known-good path regardless of the overall default. Left for the user to define, e.g.:
+		//   netgov rule add --domain example.com --via wifi
+		fmt.Println("tip   pin a critical domain to a stable uplink (lifeline), e.g. netgov rule add --domain example.com --via wifi")
 	}
 	if st.DefaultV6 == "" {
 		st.DefaultV6 = blockVia
