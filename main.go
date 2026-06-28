@@ -82,13 +82,16 @@ type AP struct {
 // armed) picks the highest-priority pattern whose Require uplinks are live and whose
 // default uplink validates internet, falling back to the Floor pattern.
 type Pattern struct {
-	Name     string   `json:"name"`
-	Priority int      `json:"priority"`
-	Require  []string `json:"require,omitempty"` // uplink names that must be LIVE (hard criteria)
-	V4       string   `json:"v4,omitempty"`      // uplink name | "block" | "direct"/"" (main table)
-	V6       string   `json:"v6,omitempty"`
-	Rules    []Rule   `json:"rules,omitempty"` // domain/source pins active under this pattern
-	Floor    bool     `json:"floor,omitempty"` // always-satisfiable fallback (Require ignored)
+	Name      string   `json:"name"`
+	Priority  int      `json:"priority"`
+	Require   []string `json:"require,omitempty"`    // uplink names that must be LIVE (hard criteria)
+	SSID      string   `json:"ssid,omitempty"`       // require this SSID (or any of a comma-list) IN RANGE
+	SSIDIface string   `json:"ssid_iface,omitempty"` // uplink name (or raw dev) whose Wi-Fi to scan for SSID
+	V4        string   `json:"v4,omitempty"`         // uplink name | "block" | "direct"/"" (main table)
+	V6        string   `json:"v6,omitempty"`
+	Rules     []Rule   `json:"rules,omitempty"` // domain/source pins active under this pattern
+	APs       []string `json:"aps,omitempty"`   // AP devices to ensure ENABLED when this pattern activates
+	Floor     bool     `json:"floor,omitempty"` // always-satisfiable fallback (Require ignored)
 }
 
 type State struct {
@@ -1231,7 +1234,63 @@ func patternsByPrio(st *State) []*Pattern {
 	return ps
 }
 
-// patternSatisfiable: every Require uplink must exist and be live (v4 or v6).
+// ssidIfaceDev resolves a pattern's SSIDIface (an uplink name, or a raw device) to a netdev.
+func ssidIfaceDev(st *State, p *Pattern) string {
+	if p.SSIDIface == "" {
+		return ""
+	}
+	if u := upByName(st, p.SSIDIface); u != nil {
+		return u.Dev
+	}
+	return p.SSIDIface
+}
+
+// ssidVisible reports whether SSID is currently in range on dev, using NetworkManager's
+// CACHED scan (--rescan no) so we never force a disruptive scan on a connected STA (the
+// lifeline). NM refreshes the cache on its own background cadence.
+func ssidVisible(dev, ssid string) bool {
+	if dev == "" || ssid == "" {
+		return false
+	}
+	out, err := run("nmcli", "-t", "-f", "SSID", "device", "wifi", "list", "ifname", dev, "--rescan", "no")
+	if err != nil {
+		return false
+	}
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.ReplaceAll(strings.TrimSpace(ln), `\:`, ":") == ssid {
+			return true
+		}
+	}
+	return false
+}
+
+// patternSSIDOK: true if no SSID criterion, or ANY of the comma-listed SSIDs is in range.
+func patternSSIDOK(st *State, p *Pattern) bool {
+	if p.SSID == "" {
+		return true
+	}
+	dev := ssidIfaceDev(st, p)
+	for _, s := range splitCSV(p.SSID) {
+		if ssidVisible(dev, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensurePatternAPs enables (gently, never tears down) the APs a pattern declares.
+func ensurePatternAPs(st *State, p *Pattern) {
+	for _, dev := range p.APs {
+		for _, a := range st.APs {
+			if a.Dev == dev && apActive(dev) != "up" {
+				_, _ = apUp(a)
+			}
+		}
+	}
+}
+
+// patternSatisfiable: every Require uplink must exist and be live (v4 or v6), and the
+// SSID criterion (if any) must be in range.
 func patternSatisfiable(st *State, p *Pattern) bool {
 	if p.Floor {
 		return true
@@ -1247,7 +1306,7 @@ func patternSatisfiable(st *State, p *Pattern) bool {
 			return false
 		}
 	}
-	return true
+	return patternSSIDOK(st, p)
 }
 
 // ensureFloor guarantees a reachable fallback exists (direct v4, blocked v6, no rules).
@@ -1346,6 +1405,7 @@ func evalPattern(st *State, apply bool) string {
 		}
 		activatePattern(st, p)
 		applyRoot(st)
+		ensurePatternAPs(st, p)
 		if !patternHasDuty(p) || validatePattern(st, p) {
 			return p.Name
 		}
@@ -1355,6 +1415,7 @@ func evalPattern(st *State, apply bool) string {
 		if apply {
 			activatePattern(st, floor)
 			applyRoot(st)
+			ensurePatternAPs(st, floor)
 		}
 		return floor.Name
 	}
@@ -1412,9 +1473,13 @@ func cmdPattern(st *State, verb string, args []string) {
 			if p.Name == st.ActivePattern {
 				tag += " *ACTIVE"
 			}
-			fmt.Printf("  [%3d] %-14s (%s)%s  v4=%s v6=%s require=%s rules=%d\n",
+			trig := dash(strings.Join(p.Require, ","))
+			if p.SSID != "" {
+				trig += " +ssid:" + p.SSID + "@" + dash(p.SSIDIface)
+			}
+			fmt.Printf("  [%3d] %-14s (%s)%s  v4=%s v6=%s trigger=%s rules=%d aps=%s\n",
 				p.Priority, p.Name, sat, tag, dash(normDefault(p.V4)), dash(normDefault(p.V6)),
-				dash(strings.Join(p.Require, ",")), len(p.Rules))
+				trig, len(p.Rules), dash(strings.Join(p.APs, ",")))
 		}
 		fmt.Println("automation:", armState(st))
 	case "pat-set":
@@ -1443,6 +1508,15 @@ func cmdPattern(st *State, verb string, args []string) {
 		}
 		if v, ok := flagVal(args, "--require"); ok {
 			p.Require = splitCSV(v)
+		}
+		if v, ok := flagVal(args, "--ssid"); ok {
+			p.SSID = v
+		}
+		if v, ok := flagVal(args, "--ssid-iface"); ok {
+			p.SSIDIface = v
+		}
+		if v, ok := flagVal(args, "--ap"); ok {
+			p.APs = splitCSV(v)
 		}
 		if hasFlag(args, "--floor") {
 			p.Floor = true
@@ -1481,6 +1555,7 @@ func cmdPattern(st *State, verb string, args []string) {
 		} else {
 			sudoSelf("__apply")
 		}
+		ensurePatternAPs(st, p)
 	}
 }
 
@@ -1559,7 +1634,8 @@ func usage() {
   reset                                        flush all netgov rules -> restore NM baseline (sudo -A)
   plan                                         dry-run, nothing executed
   pat-list                                     patterns + satisfiability + arm state
-  pat-set <name> <prio> [--require a,b] [--v4 U|block|direct] [--v6 ..] [--snapshot] [--floor]
+  pat-set <name> <prio> [--require a,b] [--ssid S[,S2] --ssid-iface <uplink>] [--ap <dev,..>]
+                        [--v4 U|block|direct] [--v6 ..] [--snapshot] [--floor]
   pat-del <name> | pat-apply <name>            delete / manually activate a pattern
   eval [--apply]                               pick best satisfiable pattern (dry, or apply)
   arm [--dry] | disarm                         root failover loop (auto pattern selection); boots disarmed

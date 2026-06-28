@@ -42,6 +42,9 @@ type patternView struct {
 	Name        string   `json:"name"`
 	Priority    int      `json:"priority"`
 	Require     []string `json:"require"`
+	SSID        string   `json:"ssid"`
+	SSIDIface   string   `json:"ssid_iface"`
+	APs         []string `json:"aps"`
 	V4          string   `json:"v4"`
 	V6          string   `json:"v6"`
 	Rules       int      `json:"rules"`
@@ -120,9 +123,9 @@ func buildView() stateView {
 			v6 = "direct"
 		}
 		v.Patterns = append(v.Patterns, patternView{
-			Name: p.Name, Priority: p.Priority, Require: p.Require, V4: v4, V6: v6,
-			Rules: len(p.Rules), RulesText: patternRulesText(p.Rules), Floor: p.Floor,
-			Satisfiable: patternSatisfiable(st, p), Active: p.Name == st.ActivePattern,
+			Name: p.Name, Priority: p.Priority, Require: p.Require, SSID: p.SSID, SSIDIface: p.SSIDIface,
+			APs: p.APs, V4: v4, V6: v6, Rules: len(p.Rules), RulesText: patternRulesText(p.Rules),
+			Floor: p.Floor, Satisfiable: patternSatisfiable(st, p), Active: p.Name == st.ActivePattern,
 		})
 	}
 	for _, u := range st.Uplinks {
@@ -326,6 +329,9 @@ func cmdWeb(st *State, args []string) {
 			p.V4 = normDefault(r.FormValue("v4"))
 			p.V6 = normDefault(r.FormValue("v6"))
 			p.Require = splitCSV(r.FormValue("require"))
+			p.SSID = strings.TrimSpace(r.FormValue("ssid"))
+			p.SSIDIface = r.FormValue("ssid_iface")
+			p.APs = splitCSV(r.FormValue("aps"))
 			p.Rules = parsePatternRules(r.FormValue("rules"))
 			_ = saveState(s, statePath())
 			writeJSON(w, buildView())
@@ -508,17 +514,20 @@ small{color:var(--mut)}
 <small style="margin-left:14px">local/LAN always stays direct · “block” = drop (leak-protect)</small></div></section>
 
 <section><h2>Patterns — roled <span id="armbadge"></span></h2><table id="pt"><thead><tr>
-<th>pri</th><th>name</th><th>require</th><th>v4</th><th>v6</th><th>rules</th><th>state</th><th></th></tr></thead><tbody></tbody></table>
+<th>pri</th><th>name</th><th>trigger</th><th>v4</th><th>v6</th><th>rules/AP</th><th>state</th><th></th></tr></thead><tbody></tbody></table>
 <div class="row"><span class="mut">automation:</span>
 <button class="go" onclick="arm('armed')">Arm</button><button onclick="arm('dry')">Dry-run</button>
 <button class="bad" onclick="arm('off')">Disarm</button><button onclick="evalNow()" title="re-evaluate &amp; apply the best pattern now">↻ eval now</button>
 <small>armed = a root loop auto-selects the best satisfiable + internet-validated pattern (poll + debounce)</small></div>
-<div class="row" style="align-items:flex-start"><input id="pn" placeholder="name" size="10"><input id="pp" placeholder="prio" size="4" value="50">
-<span class="mut">require</span><select id="prq" multiple size="3" style="min-width:88px"></select>
+<div class="row" style="align-items:flex-start;flex-wrap:wrap">
+<input id="pn" placeholder="name" size="8"><input id="pp" placeholder="prio" size="4" value="50">
 <span class="mut">v4</span><select id="pv4"></select><span class="mut">v6</span><select id="pv6"></select>
-<textarea id="prules" rows="3" cols="30" placeholder="rules, one per line:&#10;example.com wifi&#10;from:172.18.0.0/16 cable"></textarea>
+<span class="mut">require up</span><select id="prq" multiple size="2" style="min-width:74px" title="uplinks that must be UP"></select>
+<span class="mut">SSID</span><input id="pssid" placeholder="e.g. Motionlab-Member" size="17"><span class="mut">on</span><select id="pssidif" title="Wi-Fi uplink to scan"></select>
+<span class="mut">AP on</span><select id="pap" multiple size="2" style="min-width:74px" title="access points to keep up"></select>
+<textarea id="prules" rows="3" cols="26" placeholder="rules, one per line:&#10;api.anthropic.com WiFi0&#10;from:172.18.0.0/16 cable"></textarea>
 <button onclick="patSave()">+ save</button></div>
-<small style="display:block;padding:2px 14px 10px">uplink details live in NetworkManager / OS settings; APs in the card above. Lifeline: add e.g. “api.example.com wifi” to keep a service on a stable uplink. A “floor” fallback is auto-added.</small></section>
+<small style="display:block;padding:2px 14px 10px">trigger = required uplinks UP <i>and</i> (optional) an SSID in range on the chosen Wi-Fi. Uplink details live in NetworkManager / OS settings; APs in the card above. A “floor” fallback is auto-added. Click <b>edit</b> on a row to load it here.</small></section>
 
 <section class="danger"><h2>Restore</h2><div class="row">
 <button class="bad" onclick="reset()">⟲ Restore to NetworkManager</button>
@@ -549,9 +558,11 @@ function render(){
  $('#brs').textContent=S.bridges.length?'':'(no container/VM bridges detected)';
  $('#d4').innerHTML=ulOpts(S.default_v4,[['','(none)'],['block','block']]);
  $('#d6').innerHTML=ulOpts(S.default_v6,[['','(none)'],['block','block']]);
- $('#pt tbody').innerHTML=(S.patterns||[]).map(p=>'<tr><td class=mut>'+p.priority+'</td><td class=acc>'+p.name+(p.floor?' <span class=mut>(floor)</span>':'')+'</td><td class=mut>'+((p.require||[]).join(',')||'-')+'</td><td>'+p.v4+'</td><td>'+p.v6+'</td><td class=mut>'+p.rules+'</td><td>'+(p.active?'<span class="pill up">ACTIVE</span> ':'')+(p.satisfiable?'<span class="pill up">ok</span>':'<span class="pill warn">not-now</span>')+'</td><td><button onclick="patApply(\''+p.name+'\')">activate</button> <button onclick="patEdit(\''+p.name+'\')">edit</button> <button onclick="patDel(\''+p.name+'\')">×</button></td></tr>').join('')||'<tr><td class=mut colspan=8>none — build one below (a floor is auto-added on arm)</td></tr>';
+ $('#pt tbody').innerHTML=(S.patterns||[]).map(p=>{let trig=[...(p.require||[]),(p.ssid?'📶'+p.ssid:'')].filter(Boolean).join(' ')||'-';let ra=p.rules+(p.aps&&p.aps.length?' +AP':'');return '<tr><td class=mut>'+p.priority+'</td><td class=acc>'+p.name+(p.floor?' <span class=mut>(floor)</span>':'')+'</td><td class=mut>'+trig+'</td><td>'+p.v4+'</td><td>'+p.v6+'</td><td class=mut>'+ra+'</td><td>'+(p.active?'<span class="pill up">ACTIVE</span> ':'')+(p.satisfiable?'<span class="pill up">ok</span>':'<span class="pill warn">not-now</span>')+'</td><td><button onclick="patApply(\''+p.name+'\')">activate</button> <button onclick="patEdit(\''+p.name+'\')">edit</button> <button onclick="patDel(\''+p.name+'\')">×</button></td></tr>'}).join('')||'<tr><td class=mut colspan=8>none — build one below (a floor is auto-added on arm)</td></tr>';
  $('#armbadge').innerHTML=S.armed?'<span class="pill up">ARMED · '+S.armed+'</span>':'<span class="pill">disarmed</span>';
  $('#prq').innerHTML=S.uplinks.map(u=>'<option>'+u.name+'</option>').join('');
+ $('#pssidif').innerHTML=S.uplinks.map(u=>'<option'+(u.name==='WiFi0'?' selected':'')+'>'+u.name+'</option>').join('');
+ $('#pap').innerHTML=(S.aps||[]).map(a=>'<option value="'+a.dev+'">'+a.ssid+'</option>').join('')||'<option disabled>no APs</option>';
  $('#pv4').innerHTML=ulOpts('direct',[['direct','direct'],['block','block']]);
  $('#pv6').innerHTML=ulOpts('block',[['direct','direct'],['block','block']]);
  $('#sub').textContent='default v4='+(S.default_v4||'none')+'  v6='+(S.default_v6||'none')+(S.armed?'  · ARMED('+S.armed+')':'');
@@ -573,14 +584,19 @@ async function apOff(dev){if(!confirm('disable AP on '+dev+'? (it returns to the
 async function reapply(dev){log('reapplying '+dev+'…');const r=await post('/api/link',{action:'reapply',dev:dev});log(r.out||'done');load()}
 async function arm(mode){log((mode==='off'?'disarming':'arming '+mode)+'… (approve the sudo dialog)');const r=await post('/api/arm',{mode:mode});log(r.out||(r.ok?'done':'failed'));if(r.state){S=r.state;render()}else load()}
 async function evalNow(){log('evaluating… (approve the sudo dialog)');const r=await post('/api/pattern',{action:'eval'});log(r.out||'done');if(r.state){S=r.state;render()}else load()}
-async function patSave(){if(!$('#pn').value){alert('name required');return}let rq=[...$('#prq').selectedOptions].map(o=>o.value).join(',');
- S=await post('/api/pattern',{action:'set',name:$('#pn').value,priority:$('#pp').value||'50',require:rq,v4:$('#pv4').value,v6:$('#pv6').value,rules:$('#prules').value});render();$('#pn').value='';$('#prules').value=''}
+async function patSave(){if(!$('#pn').value){alert('name required');return}
+ let rq=[...$('#prq').selectedOptions].map(o=>o.value).join(',');
+ let ap=[...$('#pap').selectedOptions].map(o=>o.value).join(',');
+ S=await post('/api/pattern',{action:'set',name:$('#pn').value,priority:$('#pp').value||'50',require:rq,ssid:$('#pssid').value,ssid_iface:$('#pssidif').value,aps:ap,v4:$('#pv4').value,v6:$('#pv6').value,rules:$('#prules').value});render();$('#pn').value='';$('#prules').value='';$('#pssid').value=''}
 async function patDel(n){if(confirm('delete pattern '+n+'?')){S=await post('/api/pattern',{action:'del',name:n});render()}}
 async function patApply(n){log('activating '+n+'… (approve the sudo dialog)');const r=await post('/api/pattern',{action:'apply',name:n});log(r.out||'done');if(r.state){S=r.state;render()}else load()}
 function patEdit(n){const p=(S.patterns||[]).find(x=>x.name===n);if(!p)return;
  $('#pn').value=p.name;$('#pp').value=p.priority;
  $('#pv4').innerHTML=ulOpts(p.v4,[['direct','direct'],['block','block']]);$('#pv6').innerHTML=ulOpts(p.v6,[['direct','direct'],['block','block']]);
- [...$('#prq').options].forEach(o=>o.selected=(p.require||[]).includes(o.value));$('#prules').value=p.rules_text||'';window.scrollTo(0,document.body.scrollHeight)}
+ [...$('#prq').options].forEach(o=>o.selected=(p.require||[]).includes(o.value));
+ $('#pssid').value=p.ssid||'';[...$('#pssidif').options].forEach(o=>o.selected=(o.value===(p.ssid_iface||'WiFi0')));
+ [...$('#pap').options].forEach(o=>o.selected=(p.aps||[]).includes(o.value));
+ $('#prules').value=p.rules_text||'';window.scrollTo(0,document.body.scrollHeight)}
 async function apply(){log('applying… (approve the sudo dialog on screen)');const r=await post('/api/apply',{});log(r.out||(r.ok?'applied':'failed'));load()}
 async function reset(){if(!confirm('Remove ALL netgov rules and restore the NetworkManager baseline?'))return;log('restoring…');const r=await post('/api/reset',{});log(r.out||'done');load()}
 load();
