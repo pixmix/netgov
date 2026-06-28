@@ -33,10 +33,12 @@ type ruleView struct {
 	IPs  []string `json:"ips"`
 }
 type apView struct {
+	Name   string `json:"name"`
 	Dev    string `json:"dev"`
 	SSID   string `json:"ssid"`
 	Band   string `json:"band"`
-	Active bool   `json:"active"`
+	On     bool   `json:"on"`     // configured-on (intent)
+	Active bool   `json:"active"` // live (iw says AP)
 }
 type patternView struct {
 	Name        string   `json:"name"`
@@ -135,7 +137,7 @@ func buildView() stateView {
 		v.Uplinks = append(v.Uplinks, uplinkView{Name: u.Name, Dev: u.Dev, Table: u.Table, V4: famOf(u, "4"), V6: famOf(u, "6")})
 	}
 	for _, a := range st.APs {
-		v.APs = append(v.APs, apView{Dev: a.Dev, SSID: a.SSID, Band: a.Band, Active: apActive(a.Dev) == "up"})
+		v.APs = append(v.APs, apView{Name: a.Name, Dev: a.Dev, SSID: a.SSID, Band: a.Band, On: a.On, Active: apActive(a.Dev) == "up"})
 	}
 	for _, r := range st.Rules {
 		rv := ruleView{Via: r.Via, Fam: r.Fam}
@@ -212,44 +214,71 @@ func cmdWeb(st *State, args []string) {
 	mux.HandleFunc("/api/ap", func(w http.ResponseWriter, r *http.Request) {
 		s := loadState(statePath())
 		_ = r.ParseForm()
-		dev := resolveDev(s, r.FormValue("dev"))
+		name := r.FormValue("name")
 		switch r.FormValue("action") {
-		case "on":
-			band := r.FormValue("band")
-			if band == "" {
-				band = "bg"
+		case "save": // DEFINE/update a named AP (does not activate it)
+			if name == "" {
+				writeJSON(w, map[string]any{"ok": false, "out": "name required", "state": buildView()})
+				return
 			}
-			ch := 0
+			a := apByName(s, name)
+			if a == nil {
+				s.APs = append(s.APs, AP{Name: name})
+				a = &s.APs[len(s.APs)-1]
+			}
+			if dev := resolveDev(s, r.FormValue("dev")); dev != "" && isWifi(dev) {
+				a.Dev = dev
+				ensureUplink(s, dev)
+			}
+			if v := r.FormValue("ssid"); v != "" {
+				a.SSID = v
+			}
+			if v := r.FormValue("psk"); v != "" {
+				a.PSK = v
+			}
+			if v := r.FormValue("band"); v != "" {
+				a.Band = v
+			}
+			if a.Band == "" {
+				a.Band = "bg"
+			}
 			if v := r.FormValue("channel"); v != "" {
-				ch, _ = strconv.Atoi(v)
+				a.Channel, _ = strconv.Atoi(v)
 			}
-			ensureUplink(s, dev)
-			a := AP{Dev: dev, SSID: r.FormValue("ssid"), PSK: r.FormValue("psk"), Band: band, Channel: ch}
-			var keep []AP
-			for _, x := range s.APs {
-				if x.Dev != dev {
-					keep = append(keep, x)
-				}
-			}
-			s.APs = append(keep, a)
 			_ = saveState(s, statePath())
-			out, err := apUp(a)
+			writeJSON(w, buildView())
+		case "on":
+			err := apActivateOne(s, name)
+			_ = saveState(s, statePath())
+			out := ""
+			if err != nil {
+				out = err.Error()
+			}
 			writeJSON(w, map[string]any{"ok": err == nil, "out": out, "state": buildView()})
-			return
 		case "off":
+			if a := apByName(s, name); a != nil {
+				_, _ = apDown(a.Dev)
+				a.On = false
+			}
+			_ = saveState(s, statePath())
+			writeJSON(w, map[string]any{"ok": true, "state": buildView()})
+		case "del":
 			var keep []AP
 			for _, x := range s.APs {
-				if x.Dev != dev {
+				if x.Name == name {
+					if x.On {
+						_, _ = apDown(x.Dev)
+					}
+				} else {
 					keep = append(keep, x)
 				}
 			}
 			s.APs = keep
 			_ = saveState(s, statePath())
-			out, _ := apDown(dev)
-			writeJSON(w, map[string]any{"ok": true, "out": out, "state": buildView()})
-			return
+			writeJSON(w, buildView())
+		default:
+			writeJSON(w, buildView())
 		}
-		writeJSON(w, buildView())
 	})
 	mux.HandleFunc("/api/rule", func(w http.ResponseWriter, r *http.Request) {
 		s := loadState(statePath())
@@ -492,12 +521,13 @@ small{color:var(--mut)}
 <input id="ud" placeholder="iface" size="14"><input id="ug" placeholder="gateway (optional)" size="15">
 <button onclick="defUp()">+ uplink</button></div></section>
 
-<section><h2>Access points — WiFi interface → AP (shadows its uplink)</h2>
-<table id="at"><tbody></tbody></table>
-<div class="row"><select id="aif"></select><input id="assid" placeholder="SSID e.g. myhotspot" size="14">
-<input id="apsk" placeholder="passphrase" size="14">
+<section><h2>Access points — named definitions (a pattern picks one by name)</h2>
+<table id="at"><thead><tr><th>name</th><th>radio</th><th>SSID</th><th>band</th><th>state</th><th></th></tr></thead><tbody></tbody></table>
+<div class="row"><input id="apn" placeholder="name e.g. CNNet" size="10"><select id="aif" title="Wi-Fi radio"></select>
+<input id="assid" placeholder="SSID" size="12"><input id="apsk" placeholder="passphrase (≥8)" size="14">
 <select id="aband"><option value="bg">2.4GHz</option><option value="a">5GHz</option></select>
-<button onclick="apOn()">+ enable AP</button></div></section>
+<button onclick="apSave()">save</button></div>
+<small style="display:block;padding:2px 14px 10px">Saving <b>defines</b> an AP — it doesn't switch on. Use <b>on/off</b> for a standalone AP, or list it in a pattern's “AP on”. One AP per radio at a time; turning one on shadows that radio's uplink.</small></section>
 
 <section><h2>Destination rules — domain → uplink</h2><table id="rt"><tbody></tbody></table>
 <div class="row"><input id="rd" placeholder="domain e.g. example.com" size="26"><span class="mut">→</span>
@@ -551,7 +581,7 @@ function render(){
  $('#rt tbody').innerHTML=(dr.length?dr:[]).map(r=>'<tr><td>'+r.sel+'</td><td class="acc">'+r.via+'</td><td class="mut">['+r.fam+']</td><td class="mut">'+((r.ips||[]).join(' ')||'unresolved')+'</td><td><button onclick="delRule({domain:\''+r.sel+'\'})">×</button></td></tr>').join('')||'<tr><td class=mut colspan=5>none</td></tr>';
  const sr=S.rules.filter(r=>r.kind==='src');
  $('#st tbody').innerHTML=(sr.length?sr:[]).map(r=>'<tr><td>'+r.sel+'</td><td class="acc">'+r.via+'</td><td class="mut">['+r.fam+']</td><td><button onclick="delRule({from:\''+r.sel+'\'})">×</button></td></tr>').join('')||'<tr><td class=mut colspan=4>none</td></tr>';
- $('#at tbody').innerHTML=(S.aps||[]).map(a=>'<tr><td class="acc">'+a.dev+'</td><td>SSID '+a.ssid+'</td><td class="mut">'+(a.band==='a'?'5GHz':'2.4GHz')+'</td><td>'+(a.active?'<span class="pill up">on air</span>':'<span class="pill warn">down</span>')+'</td><td><button onclick="apOff(\''+a.dev+'\')">disable</button></td></tr>').join('')||'<tr><td class=mut colspan=5>none — enabling an AP hides that interface from Uplinks above</td></tr>';
+ $('#at tbody').innerHTML=(S.aps||[]).map(a=>'<tr><td class="acc">'+a.name+'</td><td class="mut">'+a.dev+'</td><td>'+a.ssid+'</td><td class="mut">'+(a.band==='a'?'5G':'2.4G')+'</td><td>'+(a.on?'<span class="pill up">ON</span>'+(a.active?'':' <span class="warn">…</span>'):'<span class="pill">off</span>')+'</td><td>'+(a.on?'<button onclick="apOff(\''+a.name+'\')">off</button>':'<button class="go" onclick="apOn(\''+a.name+'\')">on</button>')+' <button onclick="apEdit(\''+a.name+'\')">edit</button> <button onclick="apDel(\''+a.name+'\')">×</button></td></tr>').join('')||'<tr><td class=mut colspan=6>none — define one below (saving defines it; “on” or a pattern activates it)</td></tr>';
  $('#aif').innerHTML=(S.wifi_if||[]).map(d=>'<option>'+d+'</option>').join('');
  $('#rv').innerHTML=ulOpts('',[['block','block']]);$('#rf').innerHTML=famOpts();
  $('#sv').innerHTML=ulOpts('',[['block','block']]);$('#sf').innerHTML=famOpts();
@@ -563,7 +593,7 @@ function render(){
  $('#armbadge').innerHTML=S.armed?'<span class="pill up">ARMED · '+S.armed+'</span>':'<span class="pill">disarmed</span>';
  $('#prq').innerHTML=S.uplinks.map(u=>'<option>'+u.name+'</option>').join('');
  $('#pssidif').innerHTML=S.uplinks.map(u=>'<option'+(u.name==='WiFi0'?' selected':'')+'>'+u.name+'</option>').join('');
- $('#pap').innerHTML=(S.aps||[]).map(a=>'<option value="'+a.dev+'">'+a.ssid+'</option>').join('')||'<option disabled>no APs</option>';
+ $('#pap').innerHTML=(S.aps||[]).map(a=>'<option value="'+a.name+'">'+a.name+' ('+a.ssid+'@'+a.dev+')</option>').join('')||'<option disabled>no APs — define one in the AP card</option>';
  $('#pv4').innerHTML=ulOpts('direct',[['direct','direct'],['block','block']]);
  $('#pv6').innerHTML=ulOpts('block',[['direct','direct'],['block','block']]);
  $('#sub').textContent='default v4='+(S.default_v4||'none')+'  v6='+(S.default_v6||'none')+(S.armed?'  · ARMED('+S.armed+')':'');
@@ -578,10 +608,12 @@ async function addSrc(){let f=$('#sfrom').value;if(f===''){f=prompt('source CIDR
  S=await post('/api/rule',{action:'add',from:f,via:$('#sv').value,fam:$('#sf').value});render()}
 async function delRule(d){S=await post('/api/rule',Object.assign({action:'del'},d));render()}
 async function setDef(){S=await post('/api/default',{v4:$('#d4').value,v6:$('#d6').value});render()}
-async function apOn(){const psk=$('#apsk').value;if(psk.length<8){alert('passphrase must be >=8 chars');return}
- log('enabling AP on '+$('#aif').value+'…');const r=await post('/api/ap',{action:'on',dev:$('#aif').value,ssid:$('#assid').value,psk:psk,band:$('#aband').value});
- log(r.out||(r.ok?'AP up':'failed'));if(r.state){S=r.state;render()}else load();$('#apsk').value=''}
-async function apOff(dev){if(!confirm('disable AP on '+dev+'? (it returns to the Uplinks list)'))return;log('disabling AP '+dev+'…');const r=await post('/api/ap',{action:'off',dev:dev});log(r.out||'done');if(r.state){S=r.state;render()}else load()}
+async function apSave(){if(!$('#apn').value){alert('name required');return}const psk=$('#apsk').value;if(psk&&psk.length<8){alert('passphrase must be ≥8 chars');return}
+ S=await post('/api/ap',{action:'save',name:$('#apn').value,dev:$('#aif').value,ssid:$('#assid').value,psk:psk,band:$('#aband').value});render();$('#apn').value='';$('#assid').value='';$('#apsk').value='';log('AP defined — switch it on here, or add it to a pattern')}
+async function apOn(n){log('enabling AP '+n+'…');const r=await post('/api/ap',{action:'on',name:n});log(r.out||(r.ok?'AP up':'failed'));if(r.state){S=r.state;render()}else load()}
+async function apOff(n){if(!confirm('switch AP '+n+' off?'))return;log('disabling AP '+n+'…');const r=await post('/api/ap',{action:'off',name:n});log(r.out||'done');if(r.state){S=r.state;render()}else load()}
+function apEdit(n){const a=(S.aps||[]).find(x=>x.name===n);if(!a)return;$('#apn').value=a.name;[...$('#aif').options].forEach(o=>o.selected=o.value===a.dev);$('#assid').value=a.ssid;$('#apsk').value='';[...$('#aband').options].forEach(o=>o.selected=o.value===a.band);log('editing AP '+n+' (leave passphrase blank to keep it)')}
+async function apDel(n){if(confirm('delete AP '+n+'?')){S=await post('/api/ap',{action:'del',name:n});render()}}
 async function reapply(dev){log('reapplying '+dev+'…');const r=await post('/api/link',{action:'reapply',dev:dev});log(r.out||'done');load()}
 async function arm(mode){log((mode==='off'?'disarming':'arming '+mode)+'… (approve the sudo dialog)');const r=await post('/api/arm',{mode:mode});log(r.out||(r.ok?'done':'failed'));if(r.state){S=r.state;render()}else load()}
 async function evalNow(){log('evaluating… (approve the sudo dialog)');const r=await post('/api/pattern',{action:'eval'});log(r.out||'done');if(r.state){S=r.state;render()}else load()}
@@ -593,7 +625,7 @@ function patSnapshot(){ // fill the builder's egress fields from the CURRENT liv
  $('#pv4').innerHTML=ulOpts(S.default_v4||'direct',[['direct','direct'],['block','block']]);
  $('#pv6').innerHTML=ulOpts(S.default_v6||'block',[['direct','direct'],['block','block']]);
  $('#prules').value=(S.rules||[]).filter(r=>r.sel).map(r=>(r.kind==='src'?'from:'+r.sel:r.sel)+' '+r.via+' '+(r.fam||'both')).join('\n');
- [...$('#pap').options].forEach(o=>o.selected=(S.aps||[]).some(a=>a.dev===o.value&&a.active));
+ [...$('#pap').options].forEach(o=>o.selected=(S.aps||[]).some(a=>a.name===o.value&&a.on));
  log('snapshotted current egress into the builder — add a name + trigger, then + save')}
 async function patDel(n){if(confirm('delete pattern '+n+'?')){S=await post('/api/pattern',{action:'del',name:n});render()}}
 async function patApply(n){log('activating '+n+'… (approve the sudo dialog)');const r=await post('/api/pattern',{action:'apply',name:n});log(r.out||'done');if(r.state){S=r.state;render()}else load()}

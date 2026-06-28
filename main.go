@@ -66,15 +66,18 @@ type Rule struct {
 	Fam    string `json:"fam,omitempty"` // "4" | "6" | "both"/""
 }
 
-// AP turns a WiFi interface into an access point (NM `ipv4.method shared`: DHCP+NAT,
-// clients egress via the host default). While an AP is active on a dev, that dev's
-// uplink is shadowed (removed from egress duty); disabling the AP restores it.
+// AP is a NAMED access-point definition (NM `ipv4.method shared`: DHCP+NAT, clients egress
+// via the host default). The AP card is a LIBRARY of these; defining one does NOT activate
+// it. Patterns reference APs BY NAME and bring them up on activation. `On` = currently
+// realised; while On, that dev's uplink is shadowed. One AP may be On per device at a time.
 type AP struct {
+	Name    string `json:"name"`
 	Dev     string `json:"dev"`
 	SSID    string `json:"ssid"`
 	PSK     string `json:"psk"`
 	Band    string `json:"band"`              // bg (2.4) | a (5)
 	Channel int    `json:"channel,omitempty"` // 0 = auto
+	On      bool   `json:"on,omitempty"`      // currently realised (broadcasting)
 }
 
 // Pattern is a named, prioritised egress-policy snapshot (the roled-style layer).
@@ -90,7 +93,7 @@ type Pattern struct {
 	V4        string   `json:"v4,omitempty"`         // uplink name | "block" | "direct"/"" (main table)
 	V6        string   `json:"v6,omitempty"`
 	Rules     []Rule   `json:"rules,omitempty"` // domain/source pins active under this pattern
-	APs       []string `json:"aps,omitempty"`   // AP devices to ensure ENABLED when this pattern activates
+	APs       []string `json:"aps,omitempty"`   // AP NAMES this pattern brings up (swapped in on activation)
 	Floor     bool     `json:"floor,omitempty"` // always-satisfiable fallback (Require ignored)
 }
 
@@ -109,13 +112,96 @@ type State struct {
 	LegacyDefault string `json:"default,omitempty"` // migrated from v1
 }
 
+// servingDev: a dev is shadowed only while an AP is actually ON it.
 func servingDev(st *State, dev string) bool {
 	for _, a := range st.APs {
-		if a.Dev == dev {
+		if a.Dev == dev && a.On {
 			return true
 		}
 	}
 	return false
+}
+
+func apByName(st *State, name string) *AP {
+	for i := range st.APs {
+		if st.APs[i].Name == name {
+			return &st.APs[i]
+		}
+	}
+	return nil
+}
+
+// uniqueAPName returns base, or base2/base3/... if taken.
+func uniqueAPName(st *State, base string) string {
+	if base == "" {
+		base = "ap"
+	}
+	taken := func(n string) bool {
+		for _, a := range st.APs {
+			if a.Name == n {
+				return true
+			}
+		}
+		return false
+	}
+	if !taken(base) {
+		return base
+	}
+	for i := 2; ; i++ {
+		if n := base + itoa(i); !taken(n) {
+			return n
+		}
+	}
+}
+
+// reconcileAPs makes exactly the named APs broadcast (one per device; APs on a skipped
+// device — e.g. a radio the pattern uses as a Wi-Fi uplink — are masked out), taking down
+// any other AP that was On. This is the per-pattern "swap" behaviour.
+func reconcileAPs(st *State, want []string, skipDev map[string]bool) {
+	var eff []*AP
+	usedDev := map[string]bool{}
+	for _, name := range want {
+		a := apByName(st, name)
+		if a == nil || (skipDev != nil && skipDev[a.Dev]) || usedDev[a.Dev] {
+			continue
+		}
+		usedDev[a.Dev] = true
+		eff = append(eff, a)
+	}
+	effSet := map[string]bool{}
+	for _, a := range eff {
+		effSet[a.Name] = true
+	}
+	for i := range st.APs { // take down On APs we no longer want
+		if a := &st.APs[i]; a.On && !effSet[a.Name] {
+			_, _ = apDown(a.Dev)
+			a.On = false
+		}
+	}
+	for _, a := range eff { // bring up wanted APs not yet On
+		if !a.On {
+			if _, err := apUp(*a); err == nil {
+				a.On = true
+			}
+		}
+	}
+}
+
+// patternWifiUplinkDevs: Wi-Fi devices this pattern relies on as a STA (default uplink or
+// the SSID-scan iface) — an AP can't share that radio, so reconcile masks APs on them.
+func patternWifiUplinkDevs(st *State, p *Pattern) map[string]bool {
+	skip := map[string]bool{}
+	mark := func(ref string) {
+		if u := upByName(st, ref); u != nil && isWifi(u.Dev) {
+			skip[u.Dev] = true
+		} else if ref != "" && isWifi(ref) {
+			skip[ref] = true
+		}
+	}
+	mark(normDefault(p.V4))
+	mark(normDefault(p.V6))
+	mark(p.SSIDIface)
+	return skip
 }
 
 func apConName(dev string) string { return "netgov-ap-" + dev }
@@ -192,6 +278,32 @@ func loadState(path string) *State {
 		st.DefaultV4 = st.LegacyDefault
 		st.DefaultV6 = blockVia
 		st.LegacyDefault = ""
+	}
+	// migrate device-keyed APs -> named library. A pre-name AP was part of the ACTIVE set,
+	// so it keeps broadcasting: give it a name (from its SSID) and mark it On.
+	for i := range st.APs {
+		if st.APs[i].Name == "" {
+			base := st.APs[i].SSID
+			if base == "" {
+				base = "ap-" + st.APs[i].Dev
+			}
+			st.APs[i].Name = uniqueAPName(st, base)
+			st.APs[i].On = true
+		}
+	}
+	// migrate pattern AP references from device names (old format) to AP names, so existing
+	// patterns keep pointing at the same AP after the rename (else reconcile would drop it).
+	for pi := range st.Patterns {
+		for j, ref := range st.Patterns[pi].APs {
+			if apByName(st, ref) == nil {
+				for _, a := range st.APs {
+					if a.Dev == ref {
+						st.Patterns[pi].APs[j] = a.Name
+						break
+					}
+				}
+			}
+		}
 	}
 	return st
 }
@@ -712,6 +824,26 @@ func apActive(dev string) string {
 	return "(down)"
 }
 
+// apActivateOne brings one named AP up, taking down any other AP On the SAME device
+// (one AP per radio). Other devices' APs are left alone (use a pattern to swap those).
+func apActivateOne(st *State, name string) error {
+	a := apByName(st, name)
+	if a == nil {
+		return fmt.Errorf("no AP named %q", name)
+	}
+	for i := range st.APs {
+		if st.APs[i].Dev == a.Dev && st.APs[i].Name != name && st.APs[i].On {
+			_, _ = apDown(st.APs[i].Dev)
+			st.APs[i].On = false
+		}
+	}
+	if out, err := apUp(*a); err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
+	}
+	a.On = true
+	return nil
+}
+
 func cmdAP(st *State, args []string) {
 	if len(args) == 0 {
 		args = []string{"list"}
@@ -719,68 +851,98 @@ func cmdAP(st *State, args []string) {
 	switch args[0] {
 	case "list":
 		for _, a := range st.APs {
-			fmt.Printf("  %-16s SSID=%s band=%s ch=%d %s\n", a.Dev, a.SSID, a.Band, a.Channel, apActive(a.Dev))
+			state := "off"
+			if a.On {
+				state = "ON"
+			}
+			fmt.Printf("  %-12s dev=%-16s SSID=%-14s band=%-3s ch=%d  [%s] live=%s\n",
+				a.Name, a.Dev, a.SSID, a.Band, a.Channel, state, apActive(a.Dev))
 		}
 		if len(st.APs) == 0 {
-			fmt.Println("  (no APs) — wifi interfaces available:", strings.Join(wifiIfaces(), " "))
+			fmt.Println("  (no APs defined) — wifi interfaces:", strings.Join(wifiIfaces(), " "))
 		}
-	case "on":
+	case "save": // DEFINE/update a named AP (does NOT activate it)
 		if len(args) < 2 {
-			fmt.Println("usage: netgov ap on <iface|uplink> --ssid <s> --psk <p> [--band bg|a] [--channel N]")
+			fmt.Println("usage: netgov ap save <name> --dev <iface|uplink> --ssid <s> --psk <p> [--band bg|a] [--channel N]")
 			os.Exit(2)
 		}
-		dev := resolveDev(st, args[1])
-		if !isWifi(dev) {
-			fmt.Println(dev, "is not a wifi interface")
-			os.Exit(2)
+		name := args[1]
+		a := apByName(st, name)
+		if a == nil {
+			st.APs = append(st.APs, AP{Name: name})
+			a = &st.APs[len(st.APs)-1]
 		}
-		ssid, _ := flagVal(args, "--ssid")
-		psk, _ := flagVal(args, "--psk")
-		band, _ := flagVal(args, "--band")
-		if band == "" {
-			band = "bg"
-		}
-		ch := 0
-		if v, ok := flagVal(args, "--channel"); ok {
-			ch, _ = strconv.Atoi(v)
-		}
-		if ssid == "" || psk == "" {
-			fmt.Println("usage: netgov ap on <iface|uplink> --ssid <s> --psk <p> [--band bg|a] [--channel N]")
-			os.Exit(2)
-		}
-		ensureUplink(st, dev) // so it reappears as an uplink when the AP is turned off
-		a := AP{Dev: dev, SSID: ssid, PSK: psk, Band: band, Channel: ch}
-		var keep []AP
-		for _, x := range st.APs {
-			if x.Dev != dev {
-				keep = append(keep, x)
+		if v, ok := flagVal(args, "--dev"); ok {
+			dev := resolveDev(st, v)
+			if !isWifi(dev) {
+				fmt.Println(dev, "is not a wifi interface")
+				os.Exit(2)
 			}
+			a.Dev = dev
+			ensureUplink(st, dev) // so it reappears as an uplink when the AP is off
 		}
-		st.APs = append(keep, a)
+		if v, ok := flagVal(args, "--ssid"); ok {
+			a.SSID = v
+		}
+		if v, ok := flagVal(args, "--psk"); ok {
+			a.PSK = v
+		}
+		if v, ok := flagVal(args, "--band"); ok {
+			a.Band = v
+		}
+		if v, ok := flagVal(args, "--channel"); ok {
+			a.Channel, _ = strconv.Atoi(v)
+		}
+		if a.Band == "" {
+			a.Band = "bg"
+		}
 		must(saveState(st, statePath()))
-		if out, err := apUp(a); err != nil {
-			fmt.Fprintln(os.Stderr, "AP up failed:", out, err)
+		fmt.Printf("AP saved: %s (dev=%s ssid=%s) — defined, not activated. Use `netgov ap on %s` or add it to a pattern.\n", name, a.Dev, a.SSID, name)
+	case "on": // activate a named AP
+		if len(args) < 2 {
+			fmt.Println("usage: netgov ap on <name>")
+			os.Exit(2)
+		}
+		if err := apActivateOne(st, args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, "AP on failed:", err)
 			os.Exit(1)
 		}
-		fmt.Printf("AP up: %s SSID=%s band=%s (uplink shadowed)\n", dev, ssid, band)
+		must(saveState(st, statePath()))
+		fmt.Println("AP up:", args[1], "(its radio's uplink is shadowed)")
 	case "off":
 		if len(args) < 2 {
-			fmt.Println("usage: netgov ap off <iface|uplink>")
+			fmt.Println("usage: netgov ap off <name>")
 			os.Exit(2)
 		}
-		dev := resolveDev(st, args[1])
+		a := apByName(st, args[1])
+		if a == nil {
+			fmt.Println("no AP named", args[1])
+			os.Exit(1)
+		}
+		_, _ = apDown(a.Dev)
+		a.On = false
+		must(saveState(st, statePath()))
+		fmt.Println("AP down:", args[1], "(uplink restored)")
+	case "del":
+		if len(args) < 2 {
+			fmt.Println("usage: netgov ap del <name>")
+			os.Exit(2)
+		}
 		var keep []AP
 		for _, x := range st.APs {
-			if x.Dev != dev {
+			if x.Name == args[1] {
+				if x.On {
+					_, _ = apDown(x.Dev)
+				}
+			} else {
 				keep = append(keep, x)
 			}
 		}
 		st.APs = keep
 		must(saveState(st, statePath()))
-		out, _ := apDown(dev)
-		fmt.Printf("AP down: %s (uplink restored) %s\n", dev, out)
+		fmt.Println("AP deleted:", args[1])
 	default:
-		fmt.Println("usage: netgov ap [list|on <iface|uplink> --ssid <s> --psk <p> [--band bg|a] [--channel N]|off <iface|uplink>]")
+		fmt.Println("usage: netgov ap [list | save <name> --dev <i> --ssid <s> --psk <p> [--band bg|a] [--channel N] | on <name> | off <name> | del <name>]")
 	}
 }
 
@@ -1278,15 +1440,10 @@ func patternSSIDOK(st *State, p *Pattern) bool {
 	return false
 }
 
-// ensurePatternAPs enables (gently, never tears down) the APs a pattern declares.
-func ensurePatternAPs(st *State, p *Pattern) {
-	for _, dev := range p.APs {
-		for _, a := range st.APs {
-			if a.Dev == dev && apActive(dev) != "up" {
-				_, _ = apUp(a)
-			}
-		}
-	}
+// applyPatternAPs swaps the AP set to exactly this pattern's named APs (masking any on a
+// radio the pattern uses as a Wi-Fi uplink).
+func applyPatternAPs(st *State, p *Pattern) {
+	reconcileAPs(st, p.APs, patternWifiUplinkDevs(st, p))
 }
 
 // patternSatisfiable: every Require uplink must exist and be live (v4 or v6), and the
@@ -1405,7 +1562,7 @@ func evalPattern(st *State, apply bool) string {
 		}
 		activatePattern(st, p)
 		applyRoot(st)
-		ensurePatternAPs(st, p)
+		applyPatternAPs(st, p)
 		if !patternHasDuty(p) || validatePattern(st, p) {
 			return p.Name
 		}
@@ -1415,7 +1572,7 @@ func evalPattern(st *State, apply bool) string {
 		if apply {
 			activatePattern(st, floor)
 			applyRoot(st)
-			ensurePatternAPs(st, floor)
+			applyPatternAPs(st, floor)
 		}
 		return floor.Name
 	}
@@ -1555,7 +1712,7 @@ func cmdPattern(st *State, verb string, args []string) {
 		} else {
 			sudoSelf("__apply")
 		}
-		ensurePatternAPs(st, p)
+		applyPatternAPs(st, p)
 	}
 }
 
@@ -1626,7 +1783,7 @@ func usage() {
   status                                       uplinks, rules, defaults (per family), bridges
   init                                         auto-detect interfaces -> seed uplinks
   uplink list|define <n> --dev <i> [--gw ip]|del
-  ap    list|on <iface|uplink> --ssid <s> --psk <p> [--band bg|a] [--channel N]|off <iface|uplink>
+  ap    list | save <name> --dev <i> --ssid <s> --psk <p> [--band bg|a] [--channel N] | on <name> | off <name> | del <name>
   link  list|up <name>|down <name>|reapply <dev>   (reapply = restore link to NM profile)
   rule  add (--domain <d>|--from <cidr|iface>) --via <u|block> [--fam 4|6|both] | del | list
   default set [--v4 <u>] [--v6 <u|block>] | clear
