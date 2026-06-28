@@ -1,19 +1,23 @@
-// netgov — host-level multi-homing / policy-routing manager for a travelling NUC.
+// netgov — host-level multi-homing / policy-routing manager for Linux.
 //
-// Model: named UPLINKS (handles over interfaces: CIC wifi, USB dongle, cable to the
-// Pi router, USB phone-tether, or a direct no-router link) + RULES that steer traffic
-// by destination domain or by source (containers/VMs) to a chosen uplink, per address
-// family, plus a per-family overall DEFAULT. LOCAL/RFC1918 traffic always stays on the
-// connected link. Realised purely client-side via per-uplink routing tables +
-// `ip rule`/`ip route` — works with or without an OpenWrt router present.
+// Model: named UPLINKS (handles over network interfaces: built-in Wi-Fi, a USB Wi-Fi
+// adapter, an Ethernet link, a USB phone-tether, etc.) + RULES that steer traffic by
+// destination domain or by source (containers/VMs/subnets) to a chosen uplink, per
+// address family, plus a per-family overall DEFAULT. LOCAL/RFC1918 traffic always stays
+// on the connected link. Realised purely client-side via per-uplink routing tables +
+// `ip rule`/`ip route` — works with or without an upstream router present.
+//
+// PATTERNS add a roled-style layer: named, prioritised policy snapshots with
+// satisfiability criteria; arm/dry/disarm; and a root failover loop that auto-selects
+// the best satisfiable+validated pattern (poll-validate + debounce). Boots disarmed.
 //
 // SAFE BY DESIGN: netgov only ever ADDS rules in its own priority band [8000,29999]
 // and its own private tables [100,199]; it never edits the main table or NM profiles.
 // So `netgov reset` removes everything and the NetworkManager baseline reappears intact.
 //
-// Runs as the operator; the privileged steps (apply/reset) re-exec via `sudo -A`
-// (zenity askpass). An NM dispatcher hook re-applies as root on link-up (no dialog).
-// See semaphore lan-vpn-egress (sanctioned client-side exception, 2026-06-26).
+// The privileged steps (apply/reset/arm) re-exec via `sudo -A` (honours SUDO_ASKPASS).
+// An NM dispatcher hook re-applies as root on link-up (no dialog); when armed, a root
+// systemd service (netgov-roled.service) runs the failover loop and applies dialog-free.
 package main
 
 import (
@@ -27,6 +31,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -72,6 +77,20 @@ type AP struct {
 	Channel int    `json:"channel,omitempty"` // 0 = auto
 }
 
+// Pattern is a named, prioritised egress-policy snapshot (the roled-style layer).
+// Activating it copies V4/V6/Rules into the live State and applies. Selection (when
+// armed) picks the highest-priority pattern whose Require uplinks are live and whose
+// default uplink validates internet, falling back to the Floor pattern.
+type Pattern struct {
+	Name     string   `json:"name"`
+	Priority int      `json:"priority"`
+	Require  []string `json:"require,omitempty"` // uplink names that must be LIVE (hard criteria)
+	V4       string   `json:"v4,omitempty"`      // uplink name | "block" | "direct"/"" (main table)
+	V6       string   `json:"v6,omitempty"`
+	Rules    []Rule   `json:"rules,omitempty"` // domain/source pins active under this pattern
+	Floor    bool     `json:"floor,omitempty"` // always-satisfiable fallback (Require ignored)
+}
+
 type State struct {
 	Uplinks   []Uplink `json:"uplinks"`
 	APs       []AP     `json:"aps,omitempty"`
@@ -79,6 +98,10 @@ type State struct {
 	DefaultV4 string   `json:"default_v4,omitempty"` // uplink | "block" | ""
 	DefaultV6 string   `json:"default_v6,omitempty"`
 	WebAddr   string   `json:"web_addr,omitempty"`
+
+	Patterns      []Pattern `json:"patterns,omitempty"`
+	Armed         string    `json:"armed,omitempty"`          // "" | "armed" | "dry"
+	ActivePattern string    `json:"active_pattern,omitempty"` // last selected/activated pattern
 
 	LegacyDefault string `json:"default,omitempty"` // migrated from v1
 }
@@ -992,6 +1015,28 @@ func main() {
 		cmdRule(st, rest)
 	case "default":
 		cmdDefault(st, rest)
+	case "pat-list", "pat-set", "pat-del", "pat-apply":
+		cmdPattern(st, cmd, rest)
+	case "eval":
+		if hasFlag(rest, "--apply") {
+			if os.Geteuid() == 0 {
+				fmt.Println("eval ->", evalPattern(st, true))
+				saveStateKeepOwner(st, sp)
+			} else {
+				sudoSelf("__eval-apply")
+			}
+		} else {
+			fmt.Println("would select:", evalPattern(st, false))
+		}
+	case "__eval-apply":
+		fmt.Println("eval ->", evalPattern(st, true))
+		saveStateKeepOwner(st, sp)
+	case "arm":
+		cmdArm(st, rest)
+	case "disarm":
+		cmdDisarm(st)
+	case "roled-loop":
+		roledLoop(sp)
 	default:
 		usage()
 	}
@@ -1123,6 +1168,384 @@ func cmdDefault(st *State, args []string) {
 	}
 }
 
+// ---------- patterns / roled-style failover ----------
+
+const (
+	checkInterval = 20 * time.Second // loop cadence
+	valMax        = 45 * time.Second // max time to wait for a just-applied uplink to reach the internet
+	valPoll       = 3 * time.Second  // poll granularity within a validation/debounce window
+	debounceN     = 3                // consecutive failures before a disruptive re-eval (anti-flap)
+)
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+func hasFlag(args []string, f string) bool {
+	for _, a := range args {
+		if a == f {
+			return true
+		}
+	}
+	return false
+}
+
+// normDefault maps the user-facing "direct" to the internal "" (main table).
+func normDefault(v string) string {
+	if v == "direct" {
+		return ""
+	}
+	return v
+}
+func famDefault(p *Pattern, fam string) string {
+	if fam == "6" {
+		return p.V6
+	}
+	return p.V4
+}
+
+// patternHasDuty: false only if BOTH families are blocked (a deliberate no-egress pattern).
+func patternHasDuty(p *Pattern) bool {
+	return !(normDefault(p.V4) == blockVia && normDefault(p.V6) == blockVia)
+}
+
+func patByName(st *State, name string) *Pattern {
+	for i := range st.Patterns {
+		if st.Patterns[i].Name == name {
+			return &st.Patterns[i]
+		}
+	}
+	return nil
+}
+func patternsByPrio(st *State) []*Pattern {
+	ps := make([]*Pattern, 0, len(st.Patterns))
+	for i := range st.Patterns {
+		ps = append(ps, &st.Patterns[i])
+	}
+	sort.SliceStable(ps, func(i, j int) bool { return ps[i].Priority > ps[j].Priority })
+	return ps
+}
+
+// patternSatisfiable: every Require uplink must exist and be live (v4 or v6).
+func patternSatisfiable(st *State, p *Pattern) bool {
+	if p.Floor {
+		return true
+	}
+	for _, name := range p.Require {
+		u := upByName(st, name)
+		if u == nil {
+			return false
+		}
+		_, _, l4 := uplinkLive(*u, "4")
+		_, _, l6 := uplinkLive(*u, "6")
+		if !l4 && !l6 {
+			return false
+		}
+	}
+	return true
+}
+
+// ensureFloor guarantees a reachable fallback exists (direct v4, blocked v6, no rules).
+func ensureFloor(st *State) {
+	for i := range st.Patterns {
+		if st.Patterns[i].Floor {
+			return
+		}
+	}
+	st.Patterns = append(st.Patterns, Pattern{Name: "floor", Priority: 0, Floor: true, V4: "direct", V6: blockVia})
+}
+
+func pingPlain(fam string) bool {
+	args := []string{"ping", "-c1", "-W2", "1.1.1.1"}
+	if fam == "6" {
+		args = []string{"ping", "-6", "-c1", "-W2", "2606:4700:4700::1111"}
+	}
+	_, err := run(args...)
+	return err == nil
+}
+
+// patternInternetOK: true if any non-blocked family reaches the internet via its default
+// (direct = plain ping; uplink = ping bound to that uplink's source, honouring our rules).
+func patternInternetOK(st *State, p *Pattern) bool {
+	for _, fam := range []string{"4", "6"} {
+		v := normDefault(famDefault(p, fam))
+		if v == blockVia {
+			continue
+		}
+		if v == "" {
+			if pingPlain(fam) {
+				return true
+			}
+			continue
+		}
+		if u := upByName(st, v); u != nil {
+			if src, _, live := uplinkLive(*u, fam); live && pingVia(src, fam) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validatePattern polls patternInternetOK up to valMax, succeeding as soon as the link is up.
+func validatePattern(st *State, p *Pattern) bool {
+	deadline := time.Now().Add(valMax)
+	for {
+		if patternInternetOK(st, p) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(valPoll)
+	}
+}
+
+// patternReallyDown confirms a sustained outage (debounceN consecutive failures).
+func patternReallyDown(st *State, p *Pattern) bool {
+	for i := 0; i < debounceN; i++ {
+		if patternInternetOK(st, p) {
+			return false
+		}
+		if i < debounceN-1 {
+			time.Sleep(valPoll)
+		}
+	}
+	return true
+}
+
+// activatePattern copies a pattern's snapshot into the live State (does NOT apply).
+func activatePattern(st *State, p *Pattern) {
+	st.DefaultV4 = normDefault(p.V4)
+	st.DefaultV6 = normDefault(p.V6)
+	st.Rules = append([]Rule(nil), p.Rules...)
+	st.ActivePattern = p.Name
+}
+
+// evalPattern selects (and, if apply, activates+applies) the best pattern. Returns its name.
+func evalPattern(st *State, apply bool) string {
+	ensureFloor(st)
+	var floor *Pattern
+	for _, p := range patternsByPrio(st) {
+		if p.Floor {
+			if floor == nil {
+				floor = p
+			}
+			continue
+		}
+		if !patternSatisfiable(st, p) {
+			continue
+		}
+		if !apply {
+			return p.Name // dry: highest-priority satisfiable
+		}
+		activatePattern(st, p)
+		applyRoot(st)
+		if !patternHasDuty(p) || validatePattern(st, p) {
+			return p.Name
+		}
+		// no internet on this uplink -> walk to the next pattern
+	}
+	if floor != nil {
+		if apply {
+			activatePattern(st, floor)
+			applyRoot(st)
+		}
+		return floor.Name
+	}
+	return ""
+}
+
+// saveStateKeepOwner writes state.json and, when run as root (the loop), restores the
+// file's original owner so the user's config doesn't become root-owned.
+func saveStateKeepOwner(st *State, path string) {
+	uid, gid := -1, -1
+	if fi, err := os.Stat(path); err == nil {
+		if s, ok := fi.Sys().(*syscall.Stat_t); ok {
+			uid, gid = int(s.Uid), int(s.Gid)
+		}
+	}
+	_ = saveState(st, path)
+	if uid >= 0 {
+		_ = os.Chown(path, uid, gid)
+	}
+}
+
+func armState(st *State) string {
+	if st.Armed == "" {
+		return "off (disarmed)"
+	}
+	return "ON (mode=" + st.Armed + ", active=" + dash(st.ActivePattern) + ")"
+}
+
+// runPriv runs a privileged command directly when root, else via `sudo -A` (askpass).
+func runPriv(argv ...string) error {
+	if os.Geteuid() == 0 {
+		_, err := run(argv...)
+		return err
+	}
+	cmd := exec.Command("sudo", append([]string{"-A"}, argv...)...)
+	cmd.Env = askpassEnv()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+func cmdPattern(st *State, verb string, args []string) {
+	switch verb {
+	case "pat-list":
+		ensureFloor(st)
+		fmt.Println("patterns (priority desc):")
+		for _, p := range patternsByPrio(st) {
+			sat := "not-now"
+			if patternSatisfiable(st, p) {
+				sat = "ok"
+			}
+			tag := ""
+			if p.Floor {
+				tag += " floor"
+			}
+			if p.Name == st.ActivePattern {
+				tag += " *ACTIVE"
+			}
+			fmt.Printf("  [%3d] %-14s (%s)%s  v4=%s v6=%s require=%s rules=%d\n",
+				p.Priority, p.Name, sat, tag, dash(normDefault(p.V4)), dash(normDefault(p.V6)),
+				dash(strings.Join(p.Require, ",")), len(p.Rules))
+		}
+		fmt.Println("automation:", armState(st))
+	case "pat-set":
+		if len(args) < 2 {
+			fmt.Println("usage: netgov pat-set <name> <prio> [--require a,b] [--v4 U|block|direct] [--v6 ...] [--snapshot] [--floor]")
+			os.Exit(2)
+		}
+		name := args[0]
+		prio, _ := strconv.Atoi(args[1])
+		p := patByName(st, name)
+		if p == nil {
+			st.Patterns = append(st.Patterns, Pattern{Name: name})
+			p = &st.Patterns[len(st.Patterns)-1]
+		}
+		p.Priority = prio
+		if hasFlag(args, "--snapshot") { // capture the current live policy as this pattern
+			p.V4 = st.DefaultV4
+			p.V6 = st.DefaultV6
+			p.Rules = append([]Rule(nil), st.Rules...)
+		}
+		if v, ok := flagVal(args, "--v4"); ok {
+			p.V4 = v
+		}
+		if v, ok := flagVal(args, "--v6"); ok {
+			p.V6 = v
+		}
+		if v, ok := flagVal(args, "--require"); ok {
+			p.Require = splitCSV(v)
+		}
+		if hasFlag(args, "--floor") {
+			p.Floor = true
+		}
+		must(saveState(st, statePath()))
+		fmt.Println("pattern saved:", name)
+	case "pat-del":
+		if len(args) < 1 {
+			fmt.Println("usage: netgov pat-del <name>")
+			os.Exit(2)
+		}
+		var keep []Pattern
+		for _, p := range st.Patterns {
+			if p.Name != args[0] {
+				keep = append(keep, p)
+			}
+		}
+		st.Patterns = keep
+		must(saveState(st, statePath()))
+		fmt.Println("pattern removed:", args[0])
+	case "pat-apply":
+		if len(args) < 1 {
+			fmt.Println("usage: netgov pat-apply <name>")
+			os.Exit(2)
+		}
+		p := patByName(st, args[0])
+		if p == nil {
+			fmt.Println("no such pattern:", args[0])
+			os.Exit(1)
+		}
+		activatePattern(st, p)
+		must(saveState(st, statePath()))
+		fmt.Println("activated", p.Name, "-> applying")
+		if os.Geteuid() == 0 {
+			applyRoot(st)
+		} else {
+			sudoSelf("__apply")
+		}
+	}
+}
+
+func cmdArm(st *State, args []string) {
+	mode := "armed"
+	if hasFlag(args, "--dry") || hasFlag(args, "dry") {
+		mode = "dry"
+	}
+	ensureFloor(st)
+	st.Armed = mode
+	must(saveState(st, statePath()))
+	if err := runPriv("systemctl", "enable", "--now", "netgov-roled.service"); err != nil {
+		fmt.Fprintln(os.Stderr, "could not enable netgov-roled.service (run `netgov install`?):", err)
+		os.Exit(1)
+	}
+	fmt.Println("armed (mode=" + mode + ") — netgov-roled.service enabled")
+}
+
+func cmdDisarm(st *State) {
+	st.Armed = ""
+	must(saveState(st, statePath()))
+	if err := runPriv("systemctl", "disable", "--now", "netgov-roled.service"); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not disable service:", err)
+	}
+	fmt.Println("disarmed — netgov-roled.service stopped")
+}
+
+// roledLoop is the root failover loop started by netgov-roled.service. It boots/idles
+// until armed, then keeps the active pattern's internet healthy (poll + debounce), and
+// re-evaluates on a sustained outage. Logs to stderr (captured by journald).
+func roledLoop(sp string) {
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "roled-loop must run as root")
+		os.Exit(1)
+	}
+	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[netgov-roled] "+format+"\n", a...) }
+	logf("loop start")
+	evaluated := false
+	for {
+		st := loadState(sp)
+		if st.Armed == "" || len(st.Patterns) == 0 {
+			evaluated = false
+			time.Sleep(checkInterval)
+			continue
+		}
+		active := patByName(st, st.ActivePattern)
+		need := !evaluated || active == nil
+		if active != nil && patternHasDuty(active) && patternReallyDown(st, active) {
+			logf("active '%s' internet down (confirmed x%d)", active.Name, debounceN)
+			need = true
+		}
+		if need {
+			if st.Armed == "dry" {
+				logf("re-eval (DRY): would select '%s'", evalPattern(st, false))
+			} else {
+				name := evalPattern(st, true)
+				saveStateKeepOwner(st, sp)
+				logf("re-eval -> selected '%s'", name)
+			}
+			evaluated = true
+		}
+		time.Sleep(checkInterval)
+	}
+}
+
 func usage() {
 	fmt.Println(`netgov — host multi-homing / policy-routing switchboard
   status                                       uplinks, rules, defaults (per family), bridges
@@ -1135,5 +1558,10 @@ func usage() {
   apply | refresh                              realise state (sudo -A)
   reset                                        flush all netgov rules -> restore NM baseline (sudo -A)
   plan                                         dry-run, nothing executed
+  pat-list                                     patterns + satisfiability + arm state
+  pat-set <name> <prio> [--require a,b] [--v4 U|block|direct] [--v6 ..] [--snapshot] [--floor]
+  pat-del <name> | pat-apply <name>            delete / manually activate a pattern
+  eval [--apply]                               pick best satisfiable pattern (dry, or apply)
+  arm [--dry] | disarm                         root failover loop (auto pattern selection); boots disarmed
   web [--addr 127.0.0.1:8474] | install`)
 }
