@@ -599,16 +599,16 @@ function fcell(f){if(!f.up)return '<span class="down">—</span>';
 function render(){
  $('#ut tbody').innerHTML=S.uplinks.map(u=>'<tr><td class="acc">'+u.name+'</td><td>'+u.dev+'</td><td>'+fcell(u.v4)+
   '</td><td>'+fcell(u.v6)+'</td><td class="mut">'+u.table+'</td><td><button title="restore link to NM profile" onclick="reapply(\''+u.dev+'\')">↺</button> <button onclick="delUp(\''+u.name+'\')">×</button></td></tr>').join('')||'<tr><td colspan=6 class=mut>none — run “netgov init”</td></tr>';
- const dr=S.rules.filter(r=>r.kind==='dest');
+ const dr=(S.rules||[]).filter(r=>r.kind==='dest');
  $('#rt tbody').innerHTML=(dr.length?dr:[]).map(r=>'<tr><td>'+r.sel+'</td><td class="acc">'+r.via+'</td><td class="mut">['+r.fam+']</td><td class="mut">'+((r.ips||[]).join(' ')||'unresolved')+'</td><td><button onclick="delRule({domain:\''+r.sel+'\'})">×</button></td></tr>').join('')||'<tr><td class=mut colspan=5>none</td></tr>';
- const sr=S.rules.filter(r=>r.kind==='src');
+ const sr=(S.rules||[]).filter(r=>r.kind==='src');
  $('#st tbody').innerHTML=(sr.length?sr:[]).map(r=>'<tr><td>'+r.sel+'</td><td class="acc">'+r.via+'</td><td class="mut">['+r.fam+']</td><td><button onclick="delRule({from:\''+r.sel+'\'})">×</button></td></tr>').join('')||'<tr><td class=mut colspan=4>none</td></tr>';
  $('#at tbody').innerHTML=(S.aps||[]).map(a=>'<tr><td class="acc">'+a.name+'</td><td class="mut">'+a.dev+'</td><td>'+a.ssid+'</td><td class="mut">'+(a.band==='a'?'5G':'2.4G')+'</td><td>'+(a.on?'<span class="pill up">ON</span>'+(a.active?'':' <span class="warn">…</span>'):'<span class="pill">off</span>')+'</td><td>'+(a.on?'<button onclick="apOff(\''+a.name+'\')">off</button>':'<button class="go" onclick="apOn(\''+a.name+'\')">on</button>')+' <button onclick="apEdit(\''+a.name+'\')">edit</button> <button onclick="apDel(\''+a.name+'\')">×</button></td></tr>').join('')||'<tr><td class=mut colspan=6>none — define one below (saving defines it; “on” or a pattern activates it)</td></tr>';
  $('#aif').innerHTML=(S.wifi_if||[]).map(d=>'<option>'+d+'</option>').join('');
  $('#rv').innerHTML=ulOpts('',[['block','block']]);$('#rf').innerHTML=famOpts();
  $('#sv').innerHTML=ulOpts('',[['block','block']]);$('#sf').innerHTML=famOpts();
- $('#sfrom').innerHTML=S.bridges.map(b=>'<option value="'+b.name+'">'+b.name+(b.subnet?' ('+b.subnet+')':'')+'</option>').join('')+'<option value="">— custom CIDR —</option>';
- $('#brs').textContent=S.bridges.length?'':'(no container/VM bridges detected)';
+ $('#sfrom').innerHTML=(S.bridges||[]).map(b=>'<option value="'+b.name+'">'+b.name+(b.subnet?' ('+b.subnet+')':'')+'</option>').join('')+'<option value="">— custom CIDR —</option>';
+ $('#brs').textContent=(S.bridges||[]).length?'':'(no container/VM bridges detected)';
  $('#d4').innerHTML=ulOpts(S.default_v4,[['','(none)'],['block','block']]);
  $('#d6').innerHTML=ulOpts(S.default_v6,[['','(none)'],['block','block']]);
  $('#pt tbody').innerHTML=(S.patterns||[]).map(p=>{let trig=[...(p.require||[]),(p.ssid?'📶'+p.ssid:'')].filter(Boolean).join(' ')||'-';let ra=p.rules+(p.aps&&p.aps.length?' +AP':'');return '<tr><td class=mut>'+p.priority+'</td><td class=acc>'+p.name+(p.floor?' <span class=mut>(floor)</span>':'')+'</td><td class=mut>'+trig+'</td><td>'+p.v4+'</td><td>'+p.v6+'</td><td class=mut>'+ra+'</td><td>'+(p.active?'<span class="pill up">ACTIVE</span> ':'')+(p.satisfiable?'<span class="pill up">ok</span>':'<span class="pill warn">not-now</span>')+'</td><td><button onclick="patApply(\''+p.name+'\')">activate</button> <button onclick="patEdit(\''+p.name+'\')">edit</button> <button onclick="patDel(\''+p.name+'\')">×</button></td></tr>'}).join('')||'<tr><td class=mut colspan=8>none — build one below (a floor is auto-added on arm)</td></tr>';
