@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1151,6 +1152,11 @@ func main() {
 	// binary has no marker comment to read, so this handler IS the declaration.
 	if cmd == "--version" || cmd == "version" {
 		fmt.Println(artefactVersion)
+		// Build target, line 2 (artefact-versioning rule 13). Taken from the Go runtime, so it is
+		// baked in at compile time and cannot disagree with the binary it describes. Without this
+		// a fleet check has no channel to tell two cross-compiled builds apart and will happily
+		// instruct deploying one architecture over another as a plain "upgrade".
+		fmt.Printf("# artefact-target: %s-%s\n", runtime.GOOS, runtime.GOARCH)
 		return
 	}
 
