@@ -105,6 +105,11 @@ type Pattern struct {
 	Rules     []Rule   `json:"rules,omitempty"` // domain/source pins active under this pattern
 	APs       []string `json:"aps,omitempty"`   // AP NAMES this pattern brings up (swapped in on activation)
 	Floor     bool     `json:"floor,omitempty"` // always-satisfiable fallback (Require ignored)
+
+	// Claim declares same-address arbitration for this pattern: one address, N adapters, exactly
+	// one holder chosen by priority. Inert unless this pattern is the ACTIVE one — address
+	// identity is a property of a site, not of the box. See claim.go.
+	Claim *Claim `json:"claim,omitempty"`
 }
 
 type State struct {
@@ -1219,6 +1224,8 @@ func main() {
 	case "__eval-apply":
 		fmt.Println("eval ->", evalPattern(st, true))
 		saveStateKeepOwner(st, sp)
+	case "claim":
+		cmdClaim(st, rest)
 	case "arm":
 		cmdArm(st, rest)
 	case "disarm":
@@ -1586,6 +1593,7 @@ func evalPattern(st *State, apply bool) string {
 		activatePattern(st, p)
 		applyRoot(st)
 		applyPatternAPs(st, p)
+		applyPatternClaim(p)
 		if !patternHasDuty(p) || validatePattern(st, p) {
 			return p.Name
 		}
@@ -1818,6 +1826,9 @@ func usage() {
                         [--v4 U|block|direct] [--v6 ..] [--snapshot] [--floor]
   pat-del <name> | pat-apply <name>            delete / manually activate a pattern
   eval [--apply]                               pick best satisfiable pattern (dry, or apply)
+  claim [status|eval|apply|arm|disarm]         same-address arbitration for the ACTIVE pattern's
+                                               claim group (one address, N adapters, priority);
+                                               separate arm flag, boots disarmed
   arm [--dry] | disarm                         root failover loop (auto pattern selection); boots disarmed
   web [--addr 127.0.0.1:8474] | install`)
 }
