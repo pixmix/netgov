@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,6 +45,39 @@ import (
 // policy's own definition (a consumer must be updated too). 1.x was the original uplink/rule/
 // default engine plus the roled-style patterns layer.
 const artefactVersion = "netgov/2.0"
+
+// artefactRepo is the canonical home of this source. The commit is read from the build stamp.
+const artefactRepo = "github:pixmix/netgov"
+
+// artefactSource reports repo + commit for rule 5 (provenance of a foreign-built artefact).
+// Go embeds vcs.revision/vcs.modified automatically when building from a git work tree, so this
+// needs no build flags. A dirty tree is reported as such rather than silently claiming the commit
+// — a binary built from uncommitted changes is not that commit, and saying so is the whole point.
+func artefactSource() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return artefactRepo + " (no build info)"
+	}
+	rev, dirty := "", false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return artefactRepo + " (no vcs stamp)"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if dirty {
+		return artefactRepo + " " + rev + "+dirty"
+	}
+	return artefactRepo + " " + rev
+}
 
 // ip rule priority bands we own (lower number wins).
 const (
@@ -1162,6 +1196,12 @@ func main() {
 		// a fleet check has no channel to tell two cross-compiled builds apart and will happily
 		// instruct deploying one architecture over another as a plain "upgrade".
 		fmt.Printf("# artefact-target: %s-%s\n", runtime.GOOS, runtime.GOARCH)
+		// Provenance, line 3 (rule 5): netgov is built from its OWN repo and installed into ~/bin,
+		// so the binary must say where it came from — ~/bin has no way to know. Read from the
+		// VCS stamp Go embeds automatically, NOT from -ldflags: the host custodian builds this
+		// with a plain `go build`, and provenance that depends on remembering a build flag is
+		// provenance that will be missing exactly when someone is in a hurry.
+		fmt.Printf("# artefact-source: %s\n", artefactSource())
 		return
 	}
 
