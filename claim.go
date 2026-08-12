@@ -33,8 +33,10 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -56,6 +58,36 @@ type Claim struct {
 const claimArmedFlag = "/etc/netgov-claim.armed"
 
 func claimArmed() bool { _, err := os.Stat(claimArmedFlag); return err == nil }
+
+// statePathFor resolves the state file the same way main() does, honouring --state so `claim set`
+// can be exercised against a copy rather than live state.
+func statePathFor(args []string) string {
+	if v, ok := flagVal(args, "--state"); ok {
+		return v
+	}
+	return statePath()
+}
+
+// stripFlags removes "--flag value" pairs from a positional argument list. Without it `--state
+// <path>` is parsed as a claimant spec and the command fails with a baffling message about the
+// flag name — which is exactly what it did the first time it was run.
+func stripFlags(args []string, flags ...string) []string {
+	out := []string{}
+	for i := 0; i < len(args); i++ {
+		isFlag := false
+		for _, f := range flags {
+			if args[i] == f {
+				isFlag = true
+				i++ // also skip its value
+				break
+			}
+		}
+		if !isFlag {
+			out = append(out, args[i])
+		}
+	}
+	return out
+}
 
 // devCarrier reports physical link, read straight from the kernel. Deliberately NOT nmcli:
 // invariant 2 forbids consulting anything that carries NetworkManager's own judgement.
@@ -294,7 +326,120 @@ func applyPatternClaim(p *Pattern) {
 	}
 }
 
-// cmdClaim implements `netgov claim [status|eval|apply|arm|disarm]`.
+// parseClaimant parses "dev:priority[:ssid,ssid,...]" — e.g. "enp114s0:100" or "wlo1:50:CNNet,TowerNet".
+func parseClaimant(spec string) (Claimant, error) {
+	parts := strings.Split(spec, ":")
+	if len(parts) < 2 {
+		return Claimant{}, fmt.Errorf("claimant %q: want dev:priority[:ssid,ssid]", spec)
+	}
+	prio, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return Claimant{}, fmt.Errorf("claimant %q: priority %q is not a number", spec, parts[1])
+	}
+	c := Claimant{Dev: parts[0], Priority: prio}
+	if len(parts) > 2 && parts[2] != "" {
+		for _, s := range strings.Split(parts[2], ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				c.SSIDs = append(c.SSIDs, s)
+			}
+		}
+	}
+	if _, err := os.Stat("/sys/class/net/" + c.Dev); err != nil {
+		return c, fmt.Errorf("claimant %q: no such interface on this host", c.Dev)
+	}
+	if len(c.SSIDs) > 0 && !devIsWireless(c.Dev) {
+		return c, fmt.Errorf("claimant %q: SSIDs given but %s is not wireless — they would be ignored", spec, c.Dev)
+	}
+	return c, nil
+}
+
+// claimSet declares a claim group on a pattern. This exists because the alternative was
+// hand-editing state.json — which is live state written by the daemon, not a file a human should
+// author. A claim group IS configuration, so it needs a real setter.
+func claimSet(st *State, sp string, args []string) {
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: netgov claim set <pattern> <address> <dev:prio[:ssid,ssid]> [more...]")
+		os.Exit(1)
+	}
+	name, addr, specs := args[0], args[1], args[2:]
+
+	var p *Pattern
+	for i := range st.Patterns {
+		if st.Patterns[i].Name == name {
+			p = &st.Patterns[i]
+		}
+	}
+	if p == nil {
+		fmt.Fprintf(os.Stderr, "no such pattern %q\n", name)
+		os.Exit(1)
+	}
+	if net.ParseIP(addr) == nil {
+		fmt.Fprintf(os.Stderr, "address %q is not an IP\n", addr)
+		os.Exit(1)
+	}
+
+	cl := &Claim{Address: addr}
+	seen := map[string]bool{}
+	for _, s := range specs {
+		c, err := parseClaimant(s)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if seen[c.Dev] {
+			fmt.Fprintf(os.Stderr, "claimant %s listed twice — one entry per adapter\n", c.Dev)
+			os.Exit(1)
+		}
+		seen[c.Dev] = true
+		cl.Claimants = append(cl.Claimants, c)
+	}
+	// A single claimant is legal but almost never intended: arbitration between one candidate is
+	// a no-op, so say so rather than let it look configured.
+	if len(cl.Claimants) < 2 {
+		fmt.Fprintf(os.Stderr, "note: only one claimant — nothing to arbitrate between\n")
+	}
+	p.Claim = cl
+	if err := saveState(st, sp); err != nil {
+		fmt.Fprintln(os.Stderr, "save failed:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("claim set on pattern %s: %s\n", name, addr)
+	for _, c := range cl.Claimants {
+		ss := ""
+		if len(c.SSIDs) > 0 {
+			ss = "  ssids=" + strings.Join(c.SSIDs, ",")
+		}
+		fmt.Printf("  %-14s prio=%d%s\n", c.Dev, c.Priority, ss)
+	}
+	fmt.Println("arbitration stays INERT until this pattern is active AND `netgov claim arm` is run.")
+}
+
+// claimClear removes a claim group from a pattern.
+func claimClear(st *State, sp string, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: netgov claim clear <pattern>")
+		os.Exit(1)
+	}
+	for i := range st.Patterns {
+		if st.Patterns[i].Name == args[0] {
+			if st.Patterns[i].Claim == nil {
+				fmt.Printf("pattern %s has no claim\n", args[0])
+				return
+			}
+			st.Patterns[i].Claim = nil
+			if err := saveState(st, sp); err != nil {
+				fmt.Fprintln(os.Stderr, "save failed:", err)
+				os.Exit(1)
+			}
+			fmt.Printf("claim cleared on pattern %s\n", args[0])
+			return
+		}
+	}
+	fmt.Fprintf(os.Stderr, "no such pattern %q\n", args[0])
+	os.Exit(1)
+}
+
+// cmdClaim implements `netgov claim [status|eval|apply|set|clear|arm|disarm]`.
 func cmdClaim(st *State, args []string) {
 	sub := "status"
 	if len(args) > 0 {
@@ -303,6 +448,12 @@ func cmdClaim(st *State, args []string) {
 	cl := claimForActive(st)
 
 	switch sub {
+	case "set":
+		claimSet(st, statePathFor(args), stripFlags(args[1:], "--state"))
+		return
+	case "clear":
+		claimClear(st, statePathFor(args), stripFlags(args[1:], "--state"))
+		return
 	case "arm":
 		if err := runPriv("touch", claimArmedFlag); err != nil {
 			fmt.Fprintln(os.Stderr, "arm failed:", err)
@@ -342,7 +493,7 @@ func cmdClaim(st *State, args []string) {
 			fmt.Println(" " + l)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "usage: netgov claim [status|eval|apply|arm|disarm]")
+		fmt.Fprintln(os.Stderr, "usage: netgov claim [status|eval|apply|set|clear|arm|disarm]")
 		os.Exit(1)
 	}
 }

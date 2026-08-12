@@ -63,6 +63,10 @@ type patternView struct {
 	Floor       bool     `json:"floor"`
 	Satisfiable bool     `json:"satisfiable"`
 	Active      bool     `json:"active"`
+	// Claim is surfaced because this is the one pattern property that can MOVE AN ADDRESS. A
+	// feature whose whole risk is "it changes which adapter answers to an IP" must be visible in
+	// the UI, or the operator cannot tell a pattern carries one. Nil when no claim is declared.
+	Claim *Claim `json:"claim,omitempty"`
 }
 type stateView struct {
 	Uplinks   []uplinkView  `json:"uplinks"`
@@ -137,6 +141,7 @@ func buildView() stateView {
 			Name: p.Name, Priority: p.Priority, Require: p.Require, SSID: p.SSID, SSIDIface: p.SSIDIface,
 			APs: p.APs, V4: v4, V6: v6, Rules: len(p.Rules), RulesText: patternRulesText(p.Rules),
 			Floor: p.Floor, Satisfiable: patternSatisfiable(st, p), Active: p.Name == st.ActivePattern,
+			Claim: p.Claim,
 		})
 	}
 	for _, u := range st.Uplinks {
