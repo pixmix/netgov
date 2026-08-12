@@ -353,6 +353,56 @@ func parseClaimant(spec string) (Claimant, error) {
 	return c, nil
 }
 
+// parseClaimForm parses the dashboard's single-line claim field into a Claim.
+//
+//	"192.168.222.153 enp114s0:100 wlo1:50:CNNet"   -> a claim
+//	""                                             -> nil (no claim)
+//
+// DELIBERATELY the same grammar as `netgov claim set`, so the CLI and the dashboard cannot drift
+// into two dialects of the same thing and one set of docs covers both.
+func parseClaimForm(spec string) (*Claim, error) {
+	f := strings.Fields(strings.TrimSpace(spec))
+	if len(f) == 0 {
+		return nil, nil
+	}
+	if len(f) < 2 {
+		return nil, fmt.Errorf("claim: want '<address> <dev:prio[:ssid,ssid]> ...'")
+	}
+	if net.ParseIP(f[0]) == nil {
+		return nil, fmt.Errorf("claim: %q is not an IP address", f[0])
+	}
+	cl := &Claim{Address: f[0]}
+	seen := map[string]bool{}
+	for _, s := range f[1:] {
+		c, err := parseClaimant(s)
+		if err != nil {
+			return nil, err
+		}
+		if seen[c.Dev] {
+			return nil, fmt.Errorf("claim: %s listed twice — one entry per adapter", c.Dev)
+		}
+		seen[c.Dev] = true
+		cl.Claimants = append(cl.Claimants, c)
+	}
+	return cl, nil
+}
+
+// claimFormString renders a Claim back into the field's own grammar, so loading a pattern into
+// the builder round-trips exactly what saving it would write.
+func claimFormString(cl *Claim) string {
+	if cl == nil {
+		return ""
+	}
+	out := cl.Address
+	for _, c := range cl.Claimants {
+		out += " " + c.Dev + ":" + strconv.Itoa(c.Priority)
+		if len(c.SSIDs) > 0 {
+			out += ":" + strings.Join(c.SSIDs, ",")
+		}
+	}
+	return out
+}
+
 // claimSet declares a claim group on a pattern. This exists because the alternative was
 // hand-editing state.json — which is live state written by the daemon, not a file a human should
 // author. A claim group IS configuration, so it needs a real setter.

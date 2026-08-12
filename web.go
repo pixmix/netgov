@@ -374,6 +374,18 @@ func cmdWeb(st *State, args []string) {
 				writeJSON(w, map[string]any{"ok": false, "out": "name required", "state": buildView()})
 				return
 			}
+			// Parse the claim BEFORE mutating anything, so a bad claimant spec rejects the whole
+			// save rather than leaving a half-applied pattern behind.
+			var claim *Claim
+			claimGiven := r.Form.Has("claim")
+			if claimGiven {
+				var cerr error
+				claim, cerr = parseClaimForm(r.FormValue("claim"))
+				if cerr != nil {
+					writeJSON(w, map[string]any{"ok": false, "out": cerr.Error(), "state": buildView()})
+					return
+				}
+			}
 			prio, _ := strconv.Atoi(r.FormValue("priority"))
 			p := patByName(s, name)
 			if p == nil {
@@ -388,6 +400,13 @@ func cmdWeb(st *State, args []string) {
 			p.SSIDIface = r.FormValue("ssid_iface")
 			p.APs = splitCSV(r.FormValue("aps"))
 			p.Rules = parsePatternRules(r.FormValue("rules"))
+			// Only touch Claim when the client actually sent the field. A stale browser tab
+			// (or any older client) that POSTs without it would otherwise SILENTLY WIPE a
+			// configured claim — losing address arbitration as a side effect of editing a
+			// pattern's priority.
+			if claimGiven {
+				p.Claim = claim
+			}
 			_ = saveState(s, statePath())
 			writeJSON(w, buildView())
 		case "del":
@@ -583,6 +602,7 @@ small{color:var(--mut)}
 <span class="mut">SSID</span><input id="pssid" placeholder="e.g. Motionlab-Member" size="17"><span class="mut">on</span><select id="pssidif" title="Wi-Fi uplink to scan"></select>
 <span class="mut">AP on</span><select id="pap" multiple size="2" style="min-width:74px" title="access points to keep up"></select>
 <textarea id="prules" rows="3" cols="26" placeholder="rules, one per line:&#10;api.anthropic.com WiFi0&#10;from:172.18.0.0/16 cable"></textarea>
+<input id="pclaim" placeholder="claim: 192.168.222.153 enp114s0:100 wlo1:50:CNNet" size="46" title="Same-address arbitration for THIS pattern: one address, then one dev:priority[:ssid,ssid] per adapter. Highest-priority ELIGIBLE adapter (carrier + associated to a listed SSID) holds the address; the others hold none. Leave blank for no claim. Inert until the pattern is active AND the claim arbiter is armed.">
 <button onclick="patSnapshot()" title="fill v4/v6/rules + active AP from the CURRENT live config">↧ snapshot current</button>
 <button onclick="patSave()">+ save</button></div>
 <small style="display:block;padding:2px 14px 10px">trigger = required uplinks UP <i>and</i> (optional) an SSID in range on the chosen Wi-Fi. Uplink details live in NetworkManager / OS settings; APs in the card above. A “floor” fallback is auto-added. Click <b>edit</b> on a row to load it here.</small></section>
@@ -616,7 +636,7 @@ function render(){
  $('#brs').textContent=(S.bridges||[]).length?'':'(no container/VM bridges detected)';
  $('#d4').innerHTML=ulOpts(S.default_v4,[['','(none)'],['block','block']]);
  $('#d6').innerHTML=ulOpts(S.default_v6,[['','(none)'],['block','block']]);
- $('#pt tbody').innerHTML=(S.patterns||[]).map(p=>{let trig=[...(p.require||[]),(p.ssid?'📶'+p.ssid:'')].filter(Boolean).join(' ')||'-';let ra=p.rules+(p.aps&&p.aps.length?' +AP':'');return '<tr><td class=mut>'+p.priority+'</td><td class=acc>'+p.name+(p.floor?' <span class=mut>(floor)</span>':'')+'</td><td class=mut>'+trig+'</td><td>'+p.v4+'</td><td>'+p.v6+'</td><td class=mut>'+ra+'</td><td>'+(p.active?'<span class="pill up">ACTIVE</span> ':'')+(p.satisfiable?'<span class="pill up">ok</span>':'<span class="pill warn">not-now</span>')+'</td><td><button onclick="patApply(\''+p.name+'\')">activate</button> <button onclick="patEdit(\''+p.name+'\')">edit</button> <button onclick="patDel(\''+p.name+'\')">×</button></td></tr>'}).join('')||'<tr><td class=mut colspan=8>none — build one below (a floor is auto-added on arm)</td></tr>';
+ $('#pt tbody').innerHTML=(S.patterns||[]).map(p=>{let trig=[...(p.require||[]),(p.ssid?'📶'+p.ssid:'')].filter(Boolean).join(' ')||'-';let ra=p.rules+(p.aps&&p.aps.length?' +AP':'');if(p.claim){ra+=' <span class="pill warn" title="same-address arbitration: '+p.claim.address+'">⇄'+p.claim.address+'</span>'}return '<tr><td class=mut>'+p.priority+'</td><td class=acc>'+p.name+(p.floor?' <span class=mut>(floor)</span>':'')+'</td><td class=mut>'+trig+'</td><td>'+p.v4+'</td><td>'+p.v6+'</td><td class=mut>'+ra+'</td><td>'+(p.active?'<span class="pill up">ACTIVE</span> ':'')+(p.satisfiable?'<span class="pill up">ok</span>':'<span class="pill warn">not-now</span>')+'</td><td><button onclick="patApply(\''+p.name+'\')">activate</button> <button onclick="patEdit(\''+p.name+'\')">edit</button> <button onclick="patDel(\''+p.name+'\')">×</button></td></tr>'}).join('')||'<tr><td class=mut colspan=8>none — build one below (a floor is auto-added on arm)</td></tr>';
  $('#armbadge').innerHTML=S.armed?'<span class="pill up">ARMED · '+S.armed+'</span>':'<span class="pill">disarmed</span>';
  $('#prq').innerHTML=S.uplinks.map(u=>'<option>'+u.name+'</option>').join('');
  $('#pssidif').innerHTML=S.uplinks.map(u=>'<option'+(u.name==='WiFi0'?' selected':'')+'>'+u.name+'</option>').join('');
@@ -647,7 +667,7 @@ async function evalNow(){log('evaluating… (approve the sudo dialog)');const r=
 async function patSave(){if(!$('#pn').value){alert('name required');return}
  let rq=[...$('#prq').selectedOptions].map(o=>o.value).join(',');
  let ap=[...$('#pap').selectedOptions].map(o=>o.value).join(',');
- S=await post('/api/pattern',{action:'set',name:$('#pn').value,priority:$('#pp').value||'50',require:rq,ssid:$('#pssid').value,ssid_iface:$('#pssidif').value,aps:ap,v4:$('#pv4').value,v6:$('#pv6').value,rules:$('#prules').value});render();$('#pn').value='';$('#prules').value='';$('#pssid').value=''}
+ S=await post('/api/pattern',{action:'set',name:$('#pn').value,priority:$('#pp').value||'50',require:rq,ssid:$('#pssid').value,ssid_iface:$('#pssidif').value,aps:ap,v4:$('#pv4').value,v6:$('#pv6').value,rules:$('#prules').value,claim:$('#pclaim').value});if(S && S.ok===false){alert('claim not saved: '+S.out);S=S.state}render();$('#pn').value='';$('#prules').value='';$('#pssid').value='';$('#pclaim').value=''}
 function patSnapshot(){ // fill the builder's egress fields from the CURRENT live config
  $('#pv4').innerHTML=ulOpts(S.default_v4||'direct',[['direct','direct'],['block','block']]);
  $('#pv6').innerHTML=ulOpts(S.default_v6||'block',[['direct','direct'],['block','block']]);
@@ -658,6 +678,7 @@ async function patDel(n){if(confirm('delete pattern '+n+'?')){S=await post('/api
 async function patApply(n){log('activating '+n+'… (approve the sudo dialog)');const r=await post('/api/pattern',{action:'apply',name:n});log(r.out||'done');if(r.state){S=r.state;render()}else load()}
 function patEdit(n){const p=(S.patterns||[]).find(x=>x.name===n);if(!p)return;
  $('#pn').value=p.name;$('#pp').value=p.priority;
+ $('#pclaim').value=p.claim?([p.claim.address].concat((p.claim.claimants||[]).map(c=>c.dev+':'+c.priority+(c.ssids&&c.ssids.length?':'+c.ssids.join(','):''))).join(' ')):'';
  $('#pv4').innerHTML=ulOpts(p.v4,[['direct','direct'],['block','block']]);$('#pv6').innerHTML=ulOpts(p.v6,[['direct','direct'],['block','block']]);
  [...$('#prq').options].forEach(o=>o.selected=(p.require||[]).includes(o.value));
  $('#pssid').value=p.ssid||'';[...$('#pssidif').options].forEach(o=>o.selected=(o.value===(p.ssid_iface||'WiFi0')));
