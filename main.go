@@ -35,6 +35,15 @@ import (
 	"time"
 )
 
+// artefactVersion is netgov's declared version under the mesh `artefact-versioning` policy.
+// A compiled binary carries no marker comment, so it declares over its own interface (--version).
+//
+// Major 2, not the 1.0 retrofit floor: the named-AP library rework replaced device-keyed APs
+// with a named library and required a state.json migration — an incompatible change by the
+// policy's own definition (a consumer must be updated too). 1.x was the original uplink/rule/
+// default engine plus the roled-style patterns layer.
+const artefactVersion = "netgov/2.0"
+
 // ip rule priority bands we own (lower number wins).
 const (
 	priLocal   = 8000  // RFC1918 / link-local -> main (local always direct)
@@ -1136,6 +1145,14 @@ func main() {
 		args = []string{"status"}
 	}
 	cmd, rest := args[0], args[1:]
+
+	// Declared artefact version (mesh policy `artefact-versioning`). Answered BEFORE any state
+	// is loaded: asking an artefact what it is must never depend on its runtime state, and a
+	// binary has no marker comment to read, so this handler IS the declaration.
+	if cmd == "--version" || cmd == "version" {
+		fmt.Println(artefactVersion)
+		return
+	}
 
 	sp := statePath()
 	if v, ok := flagVal(rest, "--state"); ok {
