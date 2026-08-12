@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -167,7 +169,43 @@ func buildView() stateView {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// Live state must never be cached: a stale /api/state would show the operator a network
+	// posture that no longer exists, which is worse than showing him nothing.
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// serveStatic serves an in-binary asset with a cache VALIDATOR.
+//
+// WHY: the page is a static shell compiled into the binary and served from a URL that never
+// changes, so with no ETag/Last-Modified/Cache-Control a browser may heuristically cache it and a
+// normal reload legitimately serves the PRE-DEPLOY HTML. Meanwhile /api/state updates fine — so
+// the operator gets fresh data rendered by stale JavaScript, and "deployed correctly" becomes
+// visually identical to "did not deploy at all". That happened twice on 2026-08-12 (c-001, n-214):
+// the second time the UI really had changed, everything server-side was correct, and he still
+// could not see it. A deploy whose success is indistinguishable from its failure is not shippable.
+//
+// The ETag is a hash of the CONTENT, not of the build commit: it then changes exactly when the UI
+// changes, so rebuilds that do not touch the page still answer 304 instead of forcing a re-fetch.
+// `no-cache` means REVALIDATE (not "don't cache"), so the normal case stays a cheap 304.
+func serveStatic(w http.ResponseWriter, r *http.Request, ctype, body string) {
+	etag := etagOf(body)
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", ctype)
+	// A client may send several validators, or `*`; match any of them.
+	for _, c := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+		if c = strings.TrimSpace(c); c == etag || c == "*" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+	_, _ = w.Write([]byte(body))
+}
+
+func etagOf(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return `"` + hex.EncodeToString(h[:8]) + `"`
 }
 
 func cmdWeb(st *State, args []string) {
@@ -189,16 +227,13 @@ func cmdWeb(st *State, args []string) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(pageHTML))
+		serveStatic(w, r, "text/html; charset=utf-8", pageHTML)
 	})
 	mux.HandleFunc("/help", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(helpHTML))
+		serveStatic(w, r, "text/html; charset=utf-8", helpHTML)
 	})
 	mux.HandleFunc("/api/help", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte(uiHelpMD + "\n\n---\n\n" + cliHelpMD))
+		serveStatic(w, r, "text/plain; charset=utf-8", uiHelpMD+"\n\n---\n\n"+cliHelpMD)
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, buildView()) })
 
