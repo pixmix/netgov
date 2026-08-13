@@ -93,9 +93,10 @@ netgov claim clear <pattern>
 netgov claim set LH 192.168.222.153 enp114s0:100 wlo1:50:CNNet
 ```
 
-Highest-priority **eligible** adapter wins. Eligibility is **carrier + association only**
-(never NetworkManager's connectivity verdict — that is an input downstream of the arbiter's
-own output). A Wi-Fi claimant may list the SSIDs on which it is eligible: an adapter
+Highest-priority **eligible** adapter wins. Eligibility is **carrier + association +
+gateway-answers-ARP-on-that-interface** (never NetworkManager's connectivity verdict — that
+is an input downstream of the arbiter's own output; an ARP exchange is a measurement taken on
+the interface itself). A Wi-Fi claimant may list the SSIDs on which it is eligible: an adapter
 associated to some *other* network is not a path to that address and is skipped.
 
 **Two separate arm switches — do not confuse them:**
@@ -112,6 +113,26 @@ do — `netgov claim` is safe to run at any time.
 **Safety rules it obeys:** claim-before-release (it only ever MOVES an address; if no
 claimant is eligible the current holder KEEPS it, so the box is never left with none) and
 a gratuitous ARP on hand-over, because a failover the segment cannot see is not a failover.
+
+**Eligibility also requires the gateway to answer ARP on that interface** (needs `arping`;
+absent, the probe fails open and eligibility is carrier+association only). Carrier is not a
+health signal: a cable can negotiate 1000/full and still lose most frames, and an arbiter
+trusting carrier would hand the address to it. Note the two different fail directions — a
+gateway that does not answer fails **closed** (ineligible), while a missing probe fails
+**open** (losing the ability to test a leg is not evidence against it).
+
+**Claiming on a server that wants no egress policy?** Put the claim on the **floor**: it is
+always satisfiable, so the arbitration is never inert. Declare the floor explicitly first —
+an auto-created floor carries `v6=block`, which is leak-protection for a travelling laptop
+and wrong for a server:
+
+```
+netgov pat-set floor 0 --floor --v4 direct --v6 direct
+netgov claim set floor 192.168.222.186 eno1:100 wlp0s20f3:50:CNNet
+```
+
+`direct` normalises to "no default pinned", so declaring this changes no routing. No `init`
+is needed — a claim references DEVICES, not uplinks.
 
 > ⚠️ **Gating DHCP is necessary but not sufficient.** A standby that holds no lease still
 > answers ARP for the address (Linux `arp_ignore=0`: any interface answers for any local

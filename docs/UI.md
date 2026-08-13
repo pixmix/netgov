@@ -157,7 +157,10 @@ two cannot drift into dialects:
                   priority100  priority 50
 ```
 
-Highest-priority **eligible** adapter wins; eligibility is **carrier + association only**.
+Highest-priority **eligible** adapter wins; eligibility is **carrier + association + the
+gateway answering ARP on that interface** (needs `arping`; absent, that last test fails open).
+Carrier alone is not a health signal — a cable can negotiate 1000/full and still lose most
+frames, and an arbiter trusting carrier would hand the address to it.
 Listing SSIDs on a Wi-Fi claimant matters: an adapter associated to a *different* network
 is not a path to that address. (Pointing one at an upstream WAN SSID would let the arbiter
 move the address somewhere it can never be reached.)
