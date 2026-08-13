@@ -78,13 +78,18 @@ import (
 // install` to be re-run on an existing host -- the hook on disk is from whenever it was last
 // installed, so upgrading the binary alone leaves the gap open.
 //
+// 2.8 makes the CLI safe to interrogate: `--help`/`-h`/`help` anywhere in the arguments now prints
+// and exits for EVERY verb, before any dispatch. `netgov web --help` used to start the dashboard.
+// Adds docs/OPERATING.md (embedded in /help): a verb table with MUTATES?/NEEDS-ROOT? columns, the
+// ownership/escalation model, what "armed" enforces, and the pure-arbitration worked example.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.7"
+const artefactVersion = "netgov/2.8"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -1229,6 +1234,23 @@ func main() {
 	// Declared artefact version (mesh policy `artefact-versioning`). Answered BEFORE any state
 	// is loaded: asking an artefact what it is must never depend on its runtime state, and a
 	// binary has no marker comment to read, so this handler IS the declaration.
+	// GLOBAL --help GUARD, ANSWERED BEFORE ANY DISPATCH.
+	//
+	// `netgov web --help` used to START THE DASHBOARD: `web` ignored unknown flags, so the one
+	// thing an operator types to find out what a command does was itself the command doing it.
+	// c-001 hit this on a production host (n-223), and the sibling case cost more — `web install`
+	// ran as root on a box with passwordless sudo and left a root-owned state.json behind.
+	//
+	// A help request must NEVER act. Anywhere in the argument list, for any verb, it prints and
+	// exits — so interrogating an unfamiliar verb is always safe, which is the property the
+	// operator actually needs from a CLI that can move addresses and rewrite routing.
+	for _, a := range args {
+		if a == "--help" || a == "-h" || a == "help" {
+			usage()
+			return
+		}
+	}
+
 	if cmd == "--version" || cmd == "version" {
 		fmt.Println(artefactVersion)
 		// Build target, line 2 (artefact-versioning rule 13). Taken from the Go runtime, so it is

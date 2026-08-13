@@ -22,6 +22,13 @@ var uiHelpMD string
 //go:embed docs/CLI.md
 var cliHelpMD string
 
+// OPERATING.md is the custodian's view — what a verb DOES to a live host (mutates? needs root?),
+// as opposed to what the feature is for. Embedded like the others so /help carries it onto every
+// box: the operator who needs it most is on a headless peer with no repo checkout.
+//
+//go:embed docs/OPERATING.md
+var opHelpMD string
+
 type famView struct {
 	Up       bool   `json:"up"`
 	Src      string `json:"src"`
@@ -249,7 +256,7 @@ func cmdWeb(st *State, args []string) {
 		serveStatic(w, r, "text/html; charset=utf-8", helpHTML)
 	})
 	mux.HandleFunc("/api/help", func(w http.ResponseWriter, r *http.Request) {
-		serveStatic(w, r, "text/plain; charset=utf-8", uiHelpMD+"\n\n---\n\n"+cliHelpMD)
+		serveStatic(w, r, "text/plain; charset=utf-8", opHelpMD+"\n\n---\n\n"+uiHelpMD+"\n\n---\n\n"+cliHelpMD)
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, buildView()) })
 
@@ -846,7 +853,13 @@ function md2html(md){const L=md.split('\n');let o=[],i=0;
   if(ln.startsWith('### ')){o.push('<h3>'+inl(ln.slice(4))+'</h3>');i++;continue}
   if(ln.startsWith('## ')){o.push('<h2>'+inl(ln.slice(3))+'</h2>');i++;continue}
   if(ln.startsWith('# ')){o.push('<h1>'+inl(ln.slice(2))+'</h1>');i++;continue}
-  if(ln.startsWith('> ')){let q=[];while(i<L.length&&L[i].startsWith('> ')){q.push(inl(L[i].slice(2)));i++}o.push('<blockquote>'+q.join(' ')+'</blockquote>');continue}
+  // Accept a BARE '>' too — a blank line inside a blockquote. It used to match neither this
+  // branch (which required '> ') nor the paragraph branch (which refuses anything starting '>'),
+  // so i never advanced and md2html span the browser tab forever. A doc must not be able to hang
+  // the help page; see also the belt-and-braces guard at the end of the loop.
+  if(ln.charAt(0)==='>'){let q=[];while(i<L.length&&L[i].charAt(0)==='>'){
+    let t=L[i].startsWith('> ')?L[i].slice(2):L[i].slice(1); q.push(t.trim()===''?'<br>':inl(t)); i++}
+   o.push('<blockquote>'+q.join(' ')+'</blockquote>');continue}
   if(/^---+\s*$/.test(ln)){o.push('<hr>');i++;continue}
   if(ln.startsWith('|')){let rows=[];while(i<L.length&&L[i].startsWith('|')){rows.push(L[i]);i++}
    let h=cells(rows[0]),b=rows.slice(2),t='<table><thead><tr>'+h.map(x=>'<th>'+inl(x)+'</th>').join('')+'</tr></thead><tbody>';
@@ -863,6 +876,10 @@ function md2html(md){const L=md.split('\n');let o=[],i=0;
     while(i<L.length&&cont(L[i])){t+=' '+L[i].trim();i++}it.push('<li>'+inl(t)+'</li>')}o.push('<ol>'+it.join('')+'</ol>');continue}
   if(ln.trim()===''){i++;continue}
   let p=[];while(i<L.length&&L[i].trim()!==''&&!/^(#|>|\||---|\s*[-*] |\s*\d+\. )/.test(L[i])&&L[i].slice(0,3)!==BT3){p.push(inl(L[i]));i++}
+  // A paragraph that consumed nothing means some line matched no branch and was not skipped.
+  // Rather than spin, emit it and move on: an odd-looking line is a cosmetic defect, an infinite
+  // loop is a hung page. This guard is what makes the renderer total over arbitrary input.
+  if(p.length===0){o.push('<p>'+inl(L[i])+'</p>');i++;continue}
   o.push('<p>'+p.join(' ')+'</p>')}
  return o.join('\n')}
 fetch('/api/help').then(r=>r.text()).then(t=>{document.getElementById('md').innerHTML=md2html(t)}).catch(e=>{document.getElementById('md').textContent='failed to load help: '+e});
