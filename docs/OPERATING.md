@@ -207,8 +207,22 @@ Before 2.11 the winner was checked *immediately* after `nmcli connection up`, wh
 race every time: the log read `released wlo1` then `WARN: did not acquire`, and the address sat held
 by **nobody** until a later DHCP round happened to succeed. A warning is not a safety mechanism.
 
-Read the log: `restored <dev> — <addr> stays where it was` means the move was abandoned safely.
-`CRITICAL: rollback … FAILED` means the address may be held by nobody and needs a human.
+Read the log — every outcome says which it is:
+
+| line | meaning |
+|---|---|
+| `APPLIED: <dev> holds <addr>` | done |
+| `restored <dev> — <addr> stays where it was` | move abandoned **safely**, nothing lost |
+| `FAILED: … held by NOBODY` | winner could not acquire and there was no incumbent to restore |
+| `CRITICAL: rollback … FAILED` | address may be unheld — **needs a human** |
+| `SUPPRESSED: … not retrying for Ns` | the cooldown below is holding a failed attempt off |
+
+> ⚠️ **A failed attempt sets a 300 s cooldown, and that is a loop-stopper, not a nicety.** Every
+> apply cycles an interface, which fires the dispatcher, which applies again — and "it converges"
+> is only true when the winner *can* acquire. On 2026-08-14 an arbiter that could not acquire ran
+> at 00:42:26, 00:43:26, 00:43:56 and kept going, leaving the address unheld each time. Clear
+> `/run/netgov-claim.failed` to retry sooner. If you see `WARN: could not record the failure
+> cooldown`, retries are **not** suppressed — disarm until it is resolved.
 
 ### Gating DHCP is necessary but not sufficient
 

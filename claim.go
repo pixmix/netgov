@@ -146,6 +146,13 @@ const (
 	claimProbeDeadline = 14 // must exceed count, or -w truncates and healthy legs read as lossy
 	claimMaxLossPct    = 10
 
+	// After a FAILED attempt, suppress further attempts for this long. Without it the arbiter
+	// loops: every apply cycles an interface, which fires the NM dispatcher, which applies again.
+	// The mutex in the hook prevents CONCURRENT runs; nothing prevented SEQUENTIAL re-triggering,
+	// and convergence — which I claimed made repeat runs harmless — only converges when the winner
+	// CAN acquire. On 2026-08-14 it ran at 00:42:26, 00:43:26, 00:43:56 and was still going.
+	claimFailCooldown = 300 // seconds
+
 	// How long to wait for the winner to acquire the address before rolling back. DHCP with a
 	// discover/offer/request/ack round plus ACD is seconds, not milliseconds; the old code waited
 	// zero and reported the resulting miss as a warning.
@@ -370,6 +377,40 @@ func claimEvaluate(cl *Claim) claimVerdict {
 	return v
 }
 
+// claimFailFile records the last failed attempt. On /run (tmpfs), so a reboot is a legitimate
+// fresh start — a box that comes up clean should be allowed to try.
+// var, not const, so tests can point it at a writable temp path. /run is root-owned, which is
+// correct for the path that matters: the loop happens on the DISPATCHER-triggered runs, and those
+// are root. A hand-run `claim apply` as an unprivileged user cannot write it — and rather than
+// swallow that, recordClaimFailure returns the error so the caller can say so. The first version
+// of this ignored the write error with `_ =` and the cooldown silently did nothing; the unit test
+// caught it, which is the only reason it is not shipping that way.
+var claimFailFile = "/run/netgov-claim.failed"
+
+// claimFailedRecently reports whether an attempt on this address failed inside the cooldown.
+func claimFailedRecently(addr string) (bool, int) {
+	b, err := os.ReadFile(claimFailFile)
+	if err != nil {
+		return false, 0
+	}
+	f := strings.Fields(strings.TrimSpace(string(b)))
+	if len(f) != 2 || f[0] != addr {
+		return false, 0
+	}
+	ts, err := strconv.ParseInt(f[1], 10, 64)
+	if err != nil {
+		return false, 0
+	}
+	left := claimFailCooldown - int(time.Now().Unix()-ts)
+	return left > 0, left
+}
+
+func recordClaimFailure(addr string) error {
+	return os.WriteFile(claimFailFile, []byte(addr+" "+strconv.FormatInt(time.Now().Unix(), 10)+"\n"), 0o644)
+}
+
+func clearClaimFailure() { _ = os.Remove(claimFailFile) }
+
 // claimReconcile enforces exactly-one-holder. dry => plan only, mutate nothing.
 //
 // Ordering implements invariant 3: the winner is brought UP before any loser is taken down, so
@@ -402,6 +443,15 @@ func claimReconcile(cl *Claim, dry bool) []string {
 
 	if dry {
 		log = append(log, "DRY-RUN: nothing applied")
+		return log
+	}
+
+	// COOLDOWN GATE — the loop stopper. A failed attempt cycles an interface, the dispatcher sees
+	// the carrier event and calls us again; without this the pair re-triggers indefinitely and
+	// every iteration leaves the address unheld.
+	if recent, left := claimFailedRecently(cl.Address); recent {
+		log = append(log, "SUPPRESSED: an attempt on "+cl.Address+" failed recently; not retrying for "+
+			strconv.Itoa(left)+"s. Clear "+claimFailFile+" to retry sooner.")
 		return log
 	}
 
@@ -454,7 +504,28 @@ func claimReconcile(cl *Claim, dry bool) []string {
 		}
 		time.Sleep(time.Second)
 	}
-	if !got && len(losers) > 0 {
+	if !got {
+		// BOTH failure paths land here. The previous guard was `!got && len(losers) > 0`, so a
+		// claim with NO incumbent — winner fails, nobody to restore — skipped this block entirely
+		// and fell through to a passing WARN. That is the case that stranded .186 on 2026-08-14:
+		// I wrote the handler for the move and left claim-with-no-incumbent exactly as broken,
+		// then reported the transaction as fixed. A failure must be loud and must set the
+		// cooldown whether or not there is anything to roll back.
+		if err := recordClaimFailure(cl.Address); err != nil {
+			// Loud, because the consequence is the loop coming back: if the cooldown cannot be
+			// recorded, nothing stops the next dispatcher event from retrying immediately.
+			log = append(log, "WARN: could not record the failure cooldown ("+err.Error()+
+				") — retries are NOT suppressed. Run as root, or disarm until this is resolved.")
+		}
+		if len(losers) == 0 {
+			log = append(log, "FAILED: "+v.Winner+" did not acquire "+cl.Address+" within "+
+				strconv.Itoa(claimAcquireTimeout)+"s. Nothing was released, so there is nothing to "+
+				"restore — but "+cl.Address+" is held by NOBODY. Check the router reservation covers "+
+				v.Winner+"'s MAC, and that no stale lease binds that MAC to a pool address.")
+			log = append(log, "COOLDOWN: further attempts suppressed for "+
+				strconv.Itoa(claimFailCooldown)+"s (a dispatcher-triggered retry would loop).")
+			return log
+		}
 		log = append(log, "ROLLBACK: "+v.Winner+" did not acquire "+cl.Address+" within "+
 			strconv.Itoa(claimAcquireTimeout)+"s — restoring the previous holder")
 		for _, l := range losers {
@@ -472,6 +543,8 @@ func claimReconcile(cl *Claim, dry bool) []string {
 			log = append(log, "restored "+l+" — "+cl.Address+" stays where it was")
 		}
 		log = append(log, "NO-OP: move abandoned; check the router reservation covers "+v.Winner+"'s MAC")
+		log = append(log, "COOLDOWN: further attempts suppressed for "+
+			strconv.Itoa(claimFailCooldown)+"s (a dispatcher-triggered retry would loop).")
 		return log
 	}
 
@@ -483,6 +556,7 @@ func claimReconcile(cl *Claim, dry bool) []string {
 		} else {
 			log = append(log, "gratuitous ARP sent on "+v.Winner+" for "+cl.Address)
 		}
+		clearClaimFailure()
 		log = append(log, "APPLIED: "+v.Winner+" holds "+cl.Address)
 	} else {
 		log = append(log, "WARN: "+v.Winner+" did not acquire "+cl.Address+" — check the router reservation covers its MAC")
