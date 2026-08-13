@@ -94,13 +94,18 @@ import (
 // Fixed at three levels: buildView never emits null for a collection, the client guards, and
 // render() is wrapped so a render bug announces itself instead of truncating the page.
 //
+// 2.11 makes an address move a TRANSACTION. The old reconcile released the loser, checked the
+// winner immediately (losing the DHCP race every time), and reported the miss as a WARNING --
+// leaving the address held by nobody. It now waits for the winner to acquire and ROLLS BACK to
+// the previous holder if it does not.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.10"
+const artefactVersion = "netgov/2.11"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

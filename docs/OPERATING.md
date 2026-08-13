@@ -176,6 +176,22 @@ Verify routing really did not change:
 ip route; ip -6 route; ip rule        # identical before and after steps 1–2
 ```
 
+### A move is a transaction (2.11+)
+
+With a dual-MAC reservation, dnsmasq will not hand the address to the second MAC while the first
+still holds it — so a literal acquire-then-release is **impossible**. The move is therefore:
+
+```
+release the loser → wait up to 20 s for the winner to acquire → ROLL BACK if it does not
+```
+
+Before 2.11 the winner was checked *immediately* after `nmcli connection up`, which loses the DHCP
+race every time: the log read `released wlo1` then `WARN: did not acquire`, and the address sat held
+by **nobody** until a later DHCP round happened to succeed. A warning is not a safety mechanism.
+
+Read the log: `restored <dev> — <addr> stays where it was` means the move was abandoned safely.
+`CRITICAL: rollback … FAILED` means the address may be held by nobody and needs a human.
+
 ### Gating DHCP is necessary but not sufficient
 
 A standby holding no lease still answers ARP for the address (Linux `arp_ignore=0`: any interface

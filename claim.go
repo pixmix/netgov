@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Claimant is one adapter's bid for the claim address.
@@ -144,6 +145,11 @@ const (
 	claimProbeCount    = 10 // arping -i takes whole seconds on iputils, so this is ~10s
 	claimProbeDeadline = 14 // must exceed count, or -w truncates and healthy legs read as lossy
 	claimMaxLossPct    = 10
+
+	// How long to wait for the winner to acquire the address before rolling back. DHCP with a
+	// discover/offer/request/ack round plus ACD is seconds, not milliseconds; the old code waited
+	// zero and reported the resulting miss as a warning.
+	claimAcquireTimeout = 20
 )
 
 // arpingStats parses arping's OWN REPORT rather than its exit code.
@@ -425,9 +431,53 @@ func claimReconcile(cl *Claim, dry bool) []string {
 			_ = runPriv("nmcli", "connection", "up", p)
 		}
 	}
+
+	// 3b. WAIT for the winner to ACTUALLY acquire, then roll back if it does not.
+	//
+	// THIS IS THE STEP THAT WAS MISSING, and its absence broke invariant 4 in practice. The old
+	// code asked devHoldsAddr immediately after `nmcli connection up` and DHCP is not instant, so
+	// the check lost the race every time: on 2026-08-13 it logged "released wlo1" then "WARN: did
+	// not acquire", leaving a real window with NOBODY holding the address on the operator's own
+	// workstation. It recovered only because a later DHCP round happened to succeed. A warning is
+	// not a safety mechanism.
+	//
+	// Why a release has to happen at all: with a dual-MAC DHCP reservation, dnsmasq will not hand
+	// the address to the second MAC while the first still holds it, so a literal acquire-then-
+	// release is impossible. The invariant's INTENT — never leave the box without the address —
+	// is therefore preserved by making the move a TRANSACTION: release, wait, and on failure
+	// restore the previous holder rather than leaving the address unheld.
+	got := false
+	for i := 0; i < claimAcquireTimeout; i++ {
+		if devHoldsAddr(v.Winner, cl.Address) {
+			got = true
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if !got && len(losers) > 0 {
+		log = append(log, "ROLLBACK: "+v.Winner+" did not acquire "+cl.Address+" within "+
+			strconv.Itoa(claimAcquireTimeout)+"s — restoring the previous holder")
+		for _, l := range losers {
+			p := devProfile(l)
+			if p == "" {
+				continue
+			}
+			if err := runPriv("nmcli", "connection", "up", p); err != nil {
+				// The one outcome worse than not moving: moved from, not moved to, and not
+				// restored. Say so unmistakably — this is the state a human must resolve.
+				log = append(log, "CRITICAL: rollback of "+l+" FAILED ("+err.Error()+") — "+
+					cl.Address+" may be held by NOBODY. Intervene.")
+				continue
+			}
+			log = append(log, "restored "+l+" — "+cl.Address+" stays where it was")
+		}
+		log = append(log, "NO-OP: move abandoned; check the router reservation covers "+v.Winner+"'s MAC")
+		return log
+	}
+
 	// 4. Gratuitous ARP (invariant 4) — the segment must be told, not assumed. Verify from a
 	//    third box; this only announces.
-	if devHoldsAddr(v.Winner, cl.Address) {
+	if got || devHoldsAddr(v.Winner, cl.Address) {
 		if err := runPriv("arping", "-U", "-c", "3", "-I", v.Winner, cl.Address); err != nil {
 			log = append(log, "WARN: gratuitous ARP failed ("+err.Error()+") — peers may still cache the old MAC")
 		} else {
