@@ -99,13 +99,18 @@ import (
 // leaving the address held by nobody. It now waits for the winner to acquire and ROLLS BACK to
 // the previous holder if it does not.
 //
+// 2.12 fixes `install` staging through FIXED-NAME files in /tmp. Under fs.protected_regular=2 a
+// sticky world-writable dir refuses even root a write-open on a file it does not own, so once
+// anyone had run install with different privileges every later run failed — and could
+// half-complete, leaving the dispatcher hook updated and the systemd unit stale.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.11"
+const artefactVersion = "netgov/2.12"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

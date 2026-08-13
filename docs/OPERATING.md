@@ -53,7 +53,12 @@ asking you" are the same sentence**, which is how a stray `install` reconfigured
 **Two verbs whose names under-describe them:**
 
 - **`web`** does not return — it serves until killed. Fine interactively, a hang in a script.
-- **`install`** is the heaviest verb here. It writes to `/etc/NetworkManager/dispatcher.d/` and
+- **`install`** is the heaviest verb here. **Run it the same way every time** (as the owning user,
+  letting it escalate). Before 2.12 it staged through fixed names in `/tmp`, and under
+  `fs.protected_regular=2` a run with different privileges than the last one failed on a file it had
+  created itself — sometimes *after* replacing the hook but before the unit, leaving them mismatched.
+  If you are on an older build and see `open /tmp/90-netgov: permission denied`, clear
+  `/tmp/90-netgov` and `/tmp/netgov-roled.service`, then re-run and **check both artefacts landed**. It writes to `/etc/NetworkManager/dispatcher.d/` and
   installs units. It is also **required after upgrading the binary** (see *Enforcement* below).
 
 ---

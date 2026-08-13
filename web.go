@@ -619,7 +619,31 @@ fi
 # ---- 2. re-apply host policy routing ------------------------------------------------------
 %s __apply --state %s >> $LOG 2>&1 || true
 `, bin, sp, bin, sp)
-	tmp := filepath.Join(os.TempDir(), "90-netgov")
+	// STAGE IN A PRIVATE RANDOM DIRECTORY, NOT FIXED NAMES IN /tmp.
+	//
+	// This used to write /tmp/90-netgov and /tmp/netgov-roled.service by fixed name. On a box with
+	// `fs.protected_regular=2` (default on Ubuntu), a sticky world-writable directory refuses even
+	// ROOT a write-open on a regular file it does not own — so once anyone had run `install`
+	// unprivileged, every later `sudo netgov install` failed with "permission denied" on a path it
+	// had itself created. c-001 hit it twice deploying 2.10.
+	//
+	// Three faults in one line: order-dependent (so intermittent, and it survived this long by
+	// only ever being run one way on any given box), a symlink/pre-creation hazard in a
+	// world-writable directory, and — worst — it could half-complete, leaving the hook updated
+	// and the unit stale. For the one verb whose entire purpose is to make the hook match the
+	// binary, a partial success is the most damaging outcome available.
+	//
+	// MkdirTemp gives a fresh 0700 directory owned by the caller: no name collision, not
+	// world-writable, so protected_regular does not apply. Both artefacts are written BEFORE
+	// anything is installed, so a write failure costs nothing on the live system.
+	stage, err := os.MkdirTemp("", "netgov-install-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "install failed: could not create staging dir:", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(stage)
+
+	tmp := filepath.Join(stage, "90-netgov")
 	must(os.WriteFile(tmp, []byte(script), 0o755))
 	dst := "/etc/NetworkManager/dispatcher.d/90-netgov"
 	cmd := exec.Command("sudo", "-A", "install", "-m", "0755", "-o", "root", "-g", "root", tmp, dst)
@@ -646,14 +670,17 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 `, bin, sp)
-	tmpU := filepath.Join(os.TempDir(), "netgov-roled.service")
+	tmpU := filepath.Join(stage, "netgov-roled.service")
 	must(os.WriteFile(tmpU, []byte(unit), 0o644))
 	uDst := "/etc/systemd/system/netgov-roled.service"
 	cmdU := exec.Command("sudo", "-A", "install", "-m", "0644", "-o", "root", "-g", "root", tmpU, uDst)
 	cmdU.Env = askpassEnv()
 	cmdU.Stdin, cmdU.Stdout, cmdU.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmdU.Run(); err != nil {
+		// Say what DID land. "install failed" after the hook was already replaced leaves a reader
+		// believing nothing changed, when in fact the box is now hook-new/unit-old.
 		fmt.Fprintln(os.Stderr, "unit install failed:", err)
+		fmt.Fprintln(os.Stderr, "PARTIAL INSTALL: the dispatcher hook at "+dst+" WAS replaced; the systemd unit was NOT. Re-run `netgov install` once the cause is cleared.")
 		os.Exit(1)
 	}
 	reload := exec.Command("sudo", "-A", "systemctl", "daemon-reload")
