@@ -251,6 +251,12 @@ func devGatewayAnswers(dev string) (bool, string) {
 	// any ceiling, so a leg with duplicate responders reports PERFECT health. And duplicate ARP
 	// replies for one address are the split-brain signature this arbiter exists to arbitrate — the
 	// pathological case would have been the one that looked cleanest.
+	//
+	//	"A detector reporting its own target condition as ideal health is worse than no
+	//	 detector, because it manufactures confidence."   — c-016, 2026-08-14
+	//
+	// That is why this clamp exists, and why the duplicates are REPORTED rather than merely
+	// absorbed: the count is evidence of the very thing the arbiter is for.
 	dup := 0
 	if recv > sent {
 		dup = recv - sent
