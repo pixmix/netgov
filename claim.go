@@ -243,8 +243,24 @@ func devGatewayAnswers(dev string) (bool, string) {
 	if !ok {
 		return true, "gateway probe unreadable — NOT verified"
 	}
+	// DUPLICATE REPLIES: recv can EXCEED sent. Observed live — "10/9 replies, -11% loss" — because
+	// arping counts responses, and more than one host answering inflates the count (a deadline can
+	// also truncate the sent count after a reply is already in flight).
+	//
+	// Left unhandled this is dangerous in exactly the wrong direction: negative loss sails under
+	// any ceiling, so a leg with duplicate responders reports PERFECT health. And duplicate ARP
+	// replies for one address are the split-brain signature this arbiter exists to arbitrate — the
+	// pathological case would have been the one that looked cleanest.
+	dup := 0
+	if recv > sent {
+		dup = recv - sent
+		recv = sent
+	}
 	loss := 100 * (sent - recv) / sent
 	stat := fmt.Sprintf("%d/%d replies to %s, %d%% loss", recv, sent, gw, loss)
+	if dup > 0 {
+		stat += fmt.Sprintf(" (+%d DUPLICATE replies — more than one host may be answering for %s)", dup, gw)
+	}
 	if loss > claimMaxLossPct {
 		// Report the FRACTION, not the verdict: "3/20 replies (85% loss)" tells an operator what
 		// happened and is checkable; "not eligible" throws the measurement away.

@@ -123,7 +123,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.16"
+const artefactVersion = "netgov/2.17"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -389,7 +389,19 @@ func askpassEnv() []string {
 	return append(os.Environ(), "SUDO_ASKPASS="+filepath.Join(homeDir(), "bin", "sudo-askpass-zenity"))
 }
 
+// statePathOverride is set once from --state, so LOAD AND SAVE cannot disagree.
+//
+// main() resolved --state for the load and then every verb called saveState(st, statePath()),
+// which re-resolved to the DEFAULT path. So `pat-set --state /tmp/copy.json` read the copy and
+// WROTE PRODUCTION. That is worse than not supporting the flag: it is a footgun aimed exactly at
+// the person being careful, and it fired on 2026-08-14 while I was setting up a test on a copy
+// precisely to avoid touching the operator's live state. It wrote a stray pattern into it.
+var statePathOverride string
+
 func statePath() string {
+	if statePathOverride != "" {
+		return statePathOverride
+	}
 	if p := os.Getenv("NETGOV_STATE"); p != "" {
 		return p
 	}
@@ -1301,10 +1313,10 @@ func main() {
 		return
 	}
 
-	sp := statePath()
 	if v, ok := flagVal(rest, "--state"); ok {
-		sp = v
+		statePathOverride = v // set BEFORE anything resolves a path, so saves follow the load
 	}
+	sp := statePath()
 	st := loadState(sp)
 
 	switch cmd {
