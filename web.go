@@ -582,7 +582,27 @@ func cmdWeb(st *State, args []string) {
 }
 
 func cmdInstall() {
+	// THE BINARY PATH MUST COME FROM THE RUNNING BINARY, NOT FROM $HOME.
+	//
+	// This was filepath.Join(homeDir(), "bin", "netgov"). Under `sudo netgov install` homeDir() is
+	// ROOT's home, so the dispatcher hook and the systemd unit were written pointing at
+	// /root/bin/netgov — a path that does not exist. Both would then fail silently on every
+	// carrier event: the hook redirects to a log nobody reads, and an armed arbiter would simply
+	// never run. That is the same shape as the armed-but-unenforcing state 2.7 was written to end,
+	// reintroduced through the install path, and it is invisible unless you read the generated
+	// file. `sudo netgov install` is a plausible thing to type — OPERATING.md even documents that
+	// install needs root — so this was reachable by following the instructions.
+	//
+	// os.Executable() names the binary that is actually running, whoever invoked it and however
+	// PATH resolved. Fall back to the old derivation only if the kernel cannot tell us.
 	bin := filepath.Join(homeDir(), "bin", "netgov")
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != "" {
+			bin = resolved
+		} else {
+			bin = exe
+		}
+	}
 	sp := statePath()
 	script := fmt.Sprintf(`#!/bin/sh
 # netgov NM dispatcher hook — runs as root on link up/down.
@@ -654,6 +674,13 @@ fi
 		os.Exit(1)
 	}
 	fmt.Println("installed dispatcher hook:", dst)
+	// The hook and unit are generated with THESE paths baked in. If install was run as a user
+	// whose state file is not the one the daemon will use, say so now rather than let an armed
+	// arbiter read an empty config on the next carrier event.
+	if _, err := os.Stat(sp); err != nil {
+		fmt.Fprintln(os.Stderr, "WARNING: baked state path does not exist: "+sp+
+			" — run install as the user that owns netgov's state, or the hook will find no claim.")
+	}
 
 	// netgov-roled.service — the root failover loop. Installed but NOT enabled
 	// (boots disarmed); `netgov arm` enables+starts it, `netgov disarm` stops it.
