@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,10 +132,78 @@ func devSSID(dev string) string {
 	return ""
 }
 
+// devGatewayAnswers reports whether the LAN gateway answers ARP **out of this specific
+// interface**. This exists because CARRIER IS NOT A HEALTH SIGNAL.
+//
+// 2026-08-13: a Raspberry Pi fell off its support and hung by its own RJ45 connectors. The
+// mechanical load on the contacts lost 80-95% of frames while the link still negotiated
+// 1000/full — carrier 1, error counters 0 at BOTH ends (a frame lost on the wire never arrives
+// to be counted, and a tx counter counts what was SENT, not what LANDED). An arbiter trusting
+// carrier would have found that leg "eligible", outranked a working wireless leg, and MOVED THE
+// ADDRESS ONTO THE BROKEN CABLE — failing at its one job while looking correct.
+//
+// Why this does not reintroduce the circularity invariant 3 forbids: it is a MEASUREMENT taken
+// on the interface itself, not a verdict computed by something downstream of this arbiter's own
+// output. NetworkManager's connectivity flag reflects the default route, which the arbiter moves,
+// so consulting it means reading your own output as your input (the 2026-08-10 flap). An ARP
+// exchange with the gateway needs no address on the interface, ignores the routing table
+// entirely, and answers the only question that matters: can frames actually cross this link.
+//
+// Fail-OPEN by design: if arping is missing or no gateway is known we return true, because a
+// missing probe must never de-address a box. Losing the ability to test a leg is not evidence
+// against it (the same reasoning as invariant 4, claim-before-release).
+// defaultGateway returns the LAN gateway from the MAIN routing table. Used only as the ARP
+// probe target for a claimant with no lease of its own; it is never used to make a routing
+// decision, so reading the main table here does not make eligibility depend on the arbiter's
+// own output the way NetworkManager's connectivity verdict would.
+func defaultGateway() string {
+	out, err := run("ip", "-4", "route", "show", "default")
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(out, "\n") {
+		f := strings.Fields(ln)
+		for i := 0; i+1 < len(f); i++ {
+			if f[i] == "via" {
+				if ip := net.ParseIP(f[i+1]); ip != nil {
+					return f[i+1]
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func devGatewayAnswers(dev string) (bool, string) {
+	// Prefer the gateway this interface was itself offered. A STANDBY claimant may hold no lease
+	// (that is the point of gating it), so fall back to the LAN default gateway — every claimant
+	// for one address is on one subnet by definition, so it is the correct target for all of them.
+	gw := dhcpRouter(dev)
+	if gw == "" {
+		gw = defaultGateway()
+	}
+	if gw == "" {
+		return true, "" // nothing to probe against — do not penalise
+	}
+	// -I binds the probe to THIS interface; -c 2 tolerates a single lost frame; -w 2 bounds it
+	// so a dead leg cannot stall an evaluation cycle.
+	if _, err := run("arping", "-I", dev, "-c", "2", "-w", "2", gw); err != nil {
+		if _, lookErr := exec.LookPath("arping"); lookErr != nil {
+			return true, "" // tool absent: fail open, and say nothing misleading
+		}
+		return false, "gateway " + gw + " does not answer on " + dev
+	}
+	return true, ""
+}
+
 // claimantEligible applies invariant 2 and nothing else.
 func claimantEligible(c Claimant) (bool, string) {
 	if !devCarrier(c.Dev) {
 		return false, "no carrier"
+	}
+	// Carrier says the PHY agreed on a link; it does not say frames cross it. See above.
+	if ok, why := devGatewayAnswers(c.Dev); !ok {
+		return false, why
 	}
 	if len(c.SSIDs) == 0 {
 		return true, "carrier up"

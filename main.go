@@ -51,13 +51,18 @@ import (
 // 2.2 adds, additive: `version`+`source` in /api/state and the header build badge, the claim
 // documentation in the embedded help, and the wrapped-bullet fix in its markdown renderer.
 //
+// 2.3 adds a gateway-ARP reachability test to claimant eligibility. Additive but behaviour-
+// changing for arbitration: a claimant whose link negotiates yet passes no frames is now
+// INELIGIBLE where it previously outranked a working one. Requires `arping` (iputils-arping);
+// absent, the probe fails open and eligibility is carrier+association as in 2.2.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.2"
+const artefactVersion = "netgov/2.3"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
