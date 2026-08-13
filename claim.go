@@ -427,6 +427,91 @@ func recordClaimFailure(addr string) error {
 
 func clearClaimFailure() { _ = os.Remove(claimFailFile) }
 
+// hookPath is where `netgov install` writes the NM dispatcher hook — the thing that actually runs
+// arbitration on a carrier event.
+const hookPath = "/etc/NetworkManager/dispatcher.d/90-netgov"
+
+// claimEnforcement answers c-016's question: is arbitration ENFORCING, or merely armed?
+//
+//	"armed=true is not a state, it is an intention. The enforceable state is
+//	 armed AND hook present AND arping capable — any one of the three missing gives you an
+//	 armed box that arbitrates nothing, and only the conjunction should be reportable as
+//	 'arbitration is on'."   — c-016, 2026-08-14
+//
+// That is three-for-three on the night of 2026-08-13/14, and every one presented as SUCCESS from
+// every angle available to an operator — systemctl clean, `claim status` giving a confident
+// verdict, the arm flag present, `grep -c claim` returning 8:
+//
+//	hook absent          ms-rosy 22:16-00:39   install had never been run there
+//	hook cannot execute  ms-rosy 00:30:53      pointed at /root/bin/netgov, logged "not found"
+//	probe inert          ms-rosy on 2.0        arping installed and capable; the build had no probe
+//
+// Reporting a conjunction as a single boolean is what let all three hide. So the tool now detects
+// the silent condition it creates itself, rather than requiring three manual checks that only a
+// custodian who has already been bitten knows to run. Same move as `ver --shadows`.
+func claimEnforcement() (bool, []string) {
+	var out []string
+	ok := true
+
+	if claimArmed() {
+		out = append(out, "armed: yes ("+claimArmedFlag+")")
+	} else {
+		out = append(out, "armed: NO — arbitration will not act (netgov claim arm)")
+		ok = false
+	}
+
+	b, err := os.ReadFile(hookPath)
+	switch {
+	case err != nil:
+		out = append(out, "hook: MISSING ("+hookPath+") — run `netgov install`")
+		ok = false
+	case !strings.Contains(string(b), "claim apply"):
+		out = append(out, "hook: present but NOT claim-aware (pre-2.7) — re-run `netgov install`")
+		ok = false
+	default:
+		bin := hookBinary(string(b))
+		switch {
+		case bin == "":
+			out = append(out, "hook: claim-aware, but its binary path could not be read")
+			ok = false
+		default:
+			if fi, err := os.Stat(bin); err != nil {
+				out = append(out, "hook: claim-aware but CANNOT EXECUTE — "+bin+" does not exist")
+				ok = false
+			} else if fi.Mode()&0o111 == 0 {
+				out = append(out, "hook: claim-aware but "+bin+" is not executable")
+				ok = false
+			} else {
+				out = append(out, "hook: OK ("+bin+", executable)")
+			}
+		}
+	}
+
+	if p, err := exec.LookPath("arping"); err != nil {
+		out = append(out, "probe: arping ABSENT — the loss test fails open, so a negotiating-but-dead link counts as eligible")
+		ok = false
+	} else {
+		out = append(out, "probe: OK ("+p+")")
+	}
+	return ok, out
+}
+
+// hookBinary pulls the netgov path out of the generated hook, so the check is against what the
+// hook will ACTUALLY run rather than what we assume install wrote.
+func hookBinary(hook string) string {
+	for _, ln := range strings.Split(hook, "\n") {
+		if !strings.Contains(ln, "claim apply") {
+			continue
+		}
+		for _, f := range strings.Fields(ln) {
+			if strings.HasSuffix(f, "/netgov") {
+				return f
+			}
+		}
+	}
+	return ""
+}
+
 // claimReconcile enforces exactly-one-holder. dry => plan only, mutate nothing.
 //
 // Ordering implements invariant 3: the winner is brought UP before any loser is taken down, so
@@ -805,7 +890,15 @@ func cmdClaim(st *State, args []string) {
 		fmt.Printf("no claim group on the active pattern (%s) — arbitration inert\n", orDash(st.ActivePattern))
 		return
 	}
-	fmt.Printf("claim %s   pattern=%s   armed=%v\n", cl.Address, st.ActivePattern, claimArmed())
+	enforcing, lines := claimEnforcement()
+	verdict := "ENFORCING"
+	if !enforcing {
+		verdict = "NOT ENFORCING"
+	}
+	fmt.Printf("claim %s   pattern=%s   arbitration: %s\n", cl.Address, st.ActivePattern, verdict)
+	for _, l := range lines {
+		fmt.Println("   " + l)
+	}
 
 	switch sub {
 	case "status", "eval":

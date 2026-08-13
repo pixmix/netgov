@@ -103,6 +103,12 @@ type stateView struct {
 	// apart, so the state that decides whether an address can MOVE is never inferred from the
 	// state of something else.
 	ClaimArmed bool `json:"claim_armed"`
+
+	// ClaimEnforcing is the CONJUNCTION, not the arm flag. c-016: "armed=true is not a state, it
+	// is an intention." A badge that reads ARMED while the hook is missing or cannot execute is
+	// the same lie the CLI used to tell, one surface along.
+	ClaimEnforcing bool     `json:"claim_enforcing"`
+	ClaimChecks    []string `json:"claim_checks"`
 }
 
 // patternRulesText renders a pattern's rules as one "selector via [fam]" line each
@@ -154,6 +160,7 @@ func buildView() stateView {
 	v := stateView{DefaultV4: st.DefaultV4, DefaultV6: st.DefaultV6, Bridges: scanBridges(), WifiIf: wifiIfaces(),
 		Armed: st.Armed, Active: st.ActivePattern,
 		Version: artefactVersion, Source: artefactSource(), ClaimArmed: claimArmed()}
+	v.ClaimEnforcing, v.ClaimChecks = claimEnforcement()
 	for _, p := range patternsByPrio(st) {
 		v4, v6 := normDefault(p.V4), normDefault(p.V6)
 		if v4 == "" {
@@ -856,7 +863,10 @@ function renderBody(){
  // The arbiter badge names the ADDRESS at stake, not just a state: "armed" alone does not tell
  // you what it is allowed to move, and that is the only fact that matters before arming.
  {const ap=(S.patterns||[]).find(p=>p.active), cl=ap&&ap.claim;
-  $('#clbadge').innerHTML=S.claim_armed?'<span class="pill up">ARMED</span>':'<span class="pill">disarmed</span>';
+  $('#clbadge').innerHTML = !S.claim_armed ? '<span class="pill">disarmed</span>'
+    : (S.claim_enforcing ? '<span class="pill up">ARMED · enforcing</span>'
+                         : '<span class="pill" style="color:var(--warn);border-color:var(--warn)">ARMED · NOT ENFORCING</span>');
+  if(S.claim_armed&&!S.claim_enforcing){$('#clbadge').title=(S.claim_checks||[]).join(' | ')}
   $('#clnote').textContent = cl
     ? 'active pattern '+ap.name+' can move '+cl.address+' between '+(cl.claimants||[]).map(c=>c.dev).join(' / ')
     : 'no claim on the active pattern — arming changes nothing until one is declared';}

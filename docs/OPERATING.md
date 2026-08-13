@@ -73,6 +73,44 @@ asking you" are the same sentence**, which is how a stray `install` reconfigured
 **Arming the loop does not arm arbitration.** They are independent, and the operator has already
 been caught by this once: he armed the loop and reasonably believed the claim was live.
 
+### `armed=true` is not a state, it is an intention
+
+> **The enforceable state is `armed AND hook present AND arping capable` — any one of the three
+> missing gives you an armed box that arbitrates nothing, and only the conjunction should be
+> reportable as "arbitration is on".** — c-016, 2026-08-14
+
+Three of the failures on the night of 2026-08-13/14 were a missing conjunct, and **every one
+presented as success from every angle available to an operator** — `systemctl` clean, `claim status`
+giving a confident verdict, the arm flag present, `grep -c claim` returning 8:
+
+| missing conjunct | how it presented |
+|---|---|
+| **hook** | `install` had never been run on that box. Armed, live, enforcing nothing, for 2 h 23 m |
+| **hook can execute** | hook present and claim-aware, pointing at a `/root/bin/netgov` that did not exist; fired on the cable event and logged `not found` twice, silently, behind `\|\| true` |
+| **probe capable** | `arping` installed and `cap_net_raw` verified — on a build with no probe at all, so the dependency was satisfied and inert |
+
+**Reporting a conjunction as a single boolean is what let all three hide.** So ask the tool, which
+now checks the condition it creates (2.18+):
+
+```
+$ netgov claim
+claim 192.168.222.153   pattern=LH   arbitration: ENFORCING
+   armed: yes (/etc/netgov-claim.armed)
+   hook: OK (/home/pm/bin/netgov, executable)
+   probe: OK (/usr/bin/arping)
+```
+
+```
+claim 192.168.222.186   pattern=floor   arbitration: NOT ENFORCING
+   armed: yes (/etc/netgov-claim.armed)
+   hook: claim-aware but CANNOT EXECUTE — /root/bin/netgov does not exist
+   probe: OK (/usr/bin/arping)
+```
+
+The dashboard badge says the same thing (`ARMED · enforcing` / `ARMED · NOT ENFORCING`, with the
+failing conjunct in the tooltip). **`claim_enforcing` in `/api/state` is the field to trust;
+`claim_armed` alone is the intention.**
+
 ### Enforcement — what actually makes an armed arbiter act
 
 | build | arbitration runs when | consequence |
