@@ -89,6 +89,13 @@ type stateView struct {
 	// cannot show a stale version: the two are fetched together or not at all.
 	Version string `json:"version"`
 	Source  string `json:"source"`
+
+	// ClaimArmed is the ADDRESS ARBITER's arm flag — deliberately separate from Armed above,
+	// which is the pattern failover loop. Two switches, one word "arm": the operator armed the
+	// loop on 2026-08-13 and reasonably believed arbitration was live. The UI must show them
+	// apart, so the state that decides whether an address can MOVE is never inferred from the
+	// state of something else.
+	ClaimArmed bool `json:"claim_armed"`
 }
 
 // patternRulesText renders a pattern's rules as one "selector via [fam]" line each
@@ -139,7 +146,7 @@ func buildView() stateView {
 	st := loadState(statePath())
 	v := stateView{DefaultV4: st.DefaultV4, DefaultV6: st.DefaultV6, Bridges: scanBridges(), WifiIf: wifiIfaces(),
 		Armed: st.Armed, Active: st.ActivePattern,
-		Version: artefactVersion, Source: artefactSource()}
+		Version: artefactVersion, Source: artefactSource(), ClaimArmed: claimArmed()}
 	for _, p := range patternsByPrio(st) {
 		v4, v6 := normDefault(p.V4), normDefault(p.V6)
 		if v4 == "" {
@@ -487,6 +494,20 @@ func cmdWeb(st *State, args []string) {
 		}
 	})
 
+	// Arms/disarms the ADDRESS ARBITER only. Kept separate from /api/arm because the two arm
+	// different things and conflating them in one endpoint is how they get conflated in a UI.
+	mux.HandleFunc("/api/claim-arm", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		argv := []string{"rm", "-f", claimArmedFlag}
+		if r.FormValue("mode") == "on" {
+			argv = []string{"touch", claimArmedFlag}
+		}
+		cmd := exec.Command("sudo", append([]string{"-A"}, argv...)...)
+		cmd.Env = askpassEnv()
+		out, err := cmd.CombinedOutput()
+		writeJSON(w, map[string]any{"ok": err == nil, "out": string(out), "state": buildView()})
+	})
+
 	mux.HandleFunc("/api/arm", func(w http.ResponseWriter, r *http.Request) {
 		s := loadState(statePath())
 		_ = r.ParseForm()
@@ -639,6 +660,10 @@ small{color:var(--mut)}
 <button class="go" onclick="arm('armed')">Arm</button><button onclick="arm('dry')">Dry-run</button>
 <button class="bad" onclick="arm('off')">Disarm</button><button onclick="evalNow()" title="re-evaluate &amp; apply the best pattern now">↻ eval now</button>
 <small>armed = a root loop auto-selects the best satisfiable + internet-validated pattern (poll + debounce)</small></div>
+<div class="row"><span class="mut">address arbitration:</span> <span id="clbadge"></span>
+<button class="go" onclick="claimArm(true)" title="allow the active pattern's claim to move its address between adapters">Arm arbitration</button>
+<button class="bad" onclick="claimArm(false)">Disarm</button>
+<small id="clnote">separate from the loop above — this is what lets a claim MOVE AN ADDRESS between adapters</small></div>
 <div class="row" style="align-items:flex-start;flex-wrap:wrap">
 <input id="pn" placeholder="name" size="8"><input id="pp" placeholder="prio" size="4" value="50">
 <span class="mut">v4</span><select id="pv4"></select><span class="mut">v6</span><select id="pv6"></select>
@@ -682,6 +707,13 @@ function render(){
  $('#d6').innerHTML=ulOpts(S.default_v6,[['','(none)'],['block','block']]);
  $('#pt tbody').innerHTML=(S.patterns||[]).map(p=>{let trig=[...(p.require||[]),(p.ssid?'📶'+p.ssid:'')].filter(Boolean).join(' ')||'-';let ra=p.rules+(p.aps&&p.aps.length?' +AP':'');if(p.claim){ra+=' <span class="pill warn" title="same-address arbitration: '+p.claim.address+'">⇄'+p.claim.address+'</span>'}return '<tr><td class=mut>'+p.priority+'</td><td class=acc>'+p.name+(p.floor?' <span class=mut>(floor)</span>':'')+'</td><td class=mut>'+trig+'</td><td>'+p.v4+'</td><td>'+p.v6+'</td><td class=mut>'+ra+'</td><td>'+(p.active?'<span class="pill up">ACTIVE</span> ':'')+(p.satisfiable?'<span class="pill up">ok</span>':'<span class="pill warn">not-now</span>')+'</td><td><button onclick="patApply(\''+p.name+'\')">activate</button> <button onclick="patEdit(\''+p.name+'\')">edit</button> <button onclick="patDel(\''+p.name+'\')">×</button></td></tr>'}).join('')||'<tr><td class=mut colspan=8>none — build one below (a floor is auto-added on arm)</td></tr>';
  $('#armbadge').innerHTML=S.armed?'<span class="pill up">ARMED · '+S.armed+'</span>':'<span class="pill">disarmed</span>';
+ // The arbiter badge names the ADDRESS at stake, not just a state: "armed" alone does not tell
+ // you what it is allowed to move, and that is the only fact that matters before arming.
+ {const ap=(S.patterns||[]).find(p=>p.active), cl=ap&&ap.claim;
+  $('#clbadge').innerHTML=S.claim_armed?'<span class="pill up">ARMED</span>':'<span class="pill">disarmed</span>';
+  $('#clnote').textContent = cl
+    ? 'active pattern '+ap.name+' can move '+cl.address+' between '+(cl.claimants||[]).map(c=>c.dev).join(' / ')
+    : 'no claim on the active pattern — arming changes nothing until one is declared';}
  $('#prq').innerHTML=S.uplinks.map(u=>'<option>'+u.name+'</option>').join('');
  $('#pssidif').innerHTML=S.uplinks.map(u=>'<option'+(u.name==='WiFi0'?' selected':'')+'>'+u.name+'</option>').join('');
  $('#pap').innerHTML=(S.aps||[]).map(a=>'<option value="'+a.name+'">'+a.name+' ('+a.ssid+'@'+a.dev+')</option>').join('')||'<option disabled>no APs — define one in the AP card</option>';
@@ -710,6 +742,15 @@ function apEdit(n){const a=(S.aps||[]).find(x=>x.name===n);if(!a)return;$('#apn'
 async function apDel(n){if(confirm('delete AP '+n+'?')){S=await post('/api/ap',{action:'del',name:n});render()}}
 async function reapply(dev){log('reapplying '+dev+'…');const r=await post('/api/link',{action:'reapply',dev:dev});log(r.out||'done');load()}
 async function arm(mode){log((mode==='off'?'disarming':'arming '+mode)+'… (approve the sudo dialog)');const r=await post('/api/arm',{mode:mode});log(r.out||(r.ok?'done':'failed'));if(r.state){S=r.state;render()}else load()}
+async function claimArm(on){
+ const ap=(S.patterns||[]).find(p=>p.active), cl=ap&&ap.claim;
+ if(on){
+   if(!cl){ if(!confirm('The active pattern carries no claim, so arming changes nothing right now. Arm anyway?')) return; }
+   else if(!confirm('Arm address arbitration?\n\n'+cl.address+' may be MOVED between '+(cl.claimants||[]).map(c=>c.dev+' (prio '+c.priority+')').join(' and ')+'.\n\nThe holder keeps the address if no claimant is eligible, but a move will drop connections bound to the old adapter.')) return;
+ }
+ const r=await post('/api/claim-arm',{mode:on?'on':'off'});
+ if(r.state)S=r.state; render(); log(r.ok?('arbitration '+(on?'ARMED':'disarmed')):('failed: '+(r.out||'')));
+}
 async function evalNow(){log('evaluating… (approve the sudo dialog)');const r=await post('/api/pattern',{action:'eval'});log(r.out||'done');if(r.state){S=r.state;render()}else load()}
 async function patSave(){if(!$('#pn').value){alert('name required');return}
  let rq=[...$('#prq').selectedOptions].map(o=>o.value).join(',');

@@ -66,13 +66,18 @@ import (
 // The operator went looking for a button that does not exist. Documenting a mechanism where a
 // user needs an instruction is a way of being accurate and unhelpful at the same time.
 //
+// 2.6 adds the dashboard control 2.5 had to apologise for: `claim_armed` in /api/state and an
+// "address arbitration" row with its own badge, Arm/Disarm and a confirm that names the address
+// and the adapters it may move between. Separate row, separate endpoint, separate badge from the
+// pattern loop -- the two arm different things and one word for both is what misled the operator.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.5"
+const artefactVersion = "netgov/2.6"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
