@@ -109,13 +109,16 @@ import (
 // not exist — so both would fail silently on every carrier event, i.e. armed-but-unenforcing
 // reintroduced through the install path, and invisible unless you read the generated file.
 //
+// 2.14 additionally REFUSES to install a hook whose binary path does not exist (c-001), turning
+// any residual case of that class from a silent no-op into an install-time error.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.13"
+const artefactVersion = "netgov/2.14"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

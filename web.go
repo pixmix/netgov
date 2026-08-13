@@ -603,6 +603,17 @@ func cmdInstall() {
 			bin = exe
 		}
 	}
+	// c-001's belt-and-braces (n-226): REFUSE to install a hook whose binary path does not exist.
+	// os.Executable() makes that unreachable in practice, but the $HOME fallback above could still
+	// produce a dead path, and the failure mode is silent by construction — the hook line ends in
+	// `|| true`, so the dispatcher exits 0, systemctl looks clean, and the only trace is a log
+	// nobody reads. Turning that into an install-time error is the difference between a tool that
+	// cannot be misinstalled and one that merely usually isn't.
+	if _, err := os.Stat(bin); err != nil {
+		fmt.Fprintln(os.Stderr, "install REFUSED: the hook would point at "+bin+
+			", which does not exist. Nothing written. Run install from the installed binary.")
+		os.Exit(1)
+	}
 	sp := statePath()
 	script := fmt.Sprintf(`#!/bin/sh
 # netgov NM dispatcher hook — runs as root on link up/down.
