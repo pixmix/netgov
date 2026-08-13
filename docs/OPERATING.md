@@ -165,6 +165,27 @@ back to carrier + association.
 Cost: ~10 s of wall time (arping's `-i` takes whole seconds), claimants probed **concurrently** so
 it is the slowest leg, not the sum. That is the price of not moving an address onto a dead cable.
 
+> ⚠️ **WHAT A PASS ACTUALLY MEANS: the probe certifies "not catastrophically broken", NOT "good".**
+> Do not read a pass as a quality attestation. With N=10 and a 10 % ceiling (reject unless ≥9 of 10
+> reply), the instrument's real power is:
+>
+> | actual loss | probability it PASSES |
+> |---|---|
+> | 0 % | 100 % |
+> | 10 % | 74 % |
+> | **15 %** | **54 %** |
+> | 20 % | 38 % |
+> | 30 % | 15 % |
+> | 50 % | 1 % |
+> | 76 % (the 2026-08-13 cable) | ~0 % |
+>
+> So it is decisive against the failure class it was written for and **weak near the threshold by
+> construction** — a leg losing 15 % passes about every other evaluation and would degrade a
+> dependent service while reading healthy. That is a deliberate trade: `arping -i` takes whole
+> seconds, so N=20 costs ~20 s and N=40 ~40 s **on every carrier event**, and a slow probe acquires
+> its own failure modes. Raising N is the lever if you ever need near-threshold sensitivity, and the
+> cost is wall time on the hook. (Analysis and framing: c-016, 2026-08-14.)
+
 ---
 
 ## Files, ownership, escalation
