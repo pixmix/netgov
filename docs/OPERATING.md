@@ -89,8 +89,21 @@ exists for.
 > unenforcing* — worse than before, because now everyone believes it is fixed.
 >
 > ```
-> grep -c claim /etc/NetworkManager/dispatcher.d/90-netgov     # 0 = old hook
+> # WRONG — proves the hook MENTIONS claim, not that it can RUN:
+> #   grep -c claim /etc/NetworkManager/dispatcher.d/90-netgov
+>
+> # Right — does the hook's binary exist and is the state path real?
+> awk '/netgov/ {for(i=1;i<=NF;i++) if($i ~ /\/netgov$/) print $i}' \
+>     /etc/NetworkManager/dispatcher.d/90-netgov | sort -u | xargs -r ls -l
+> grep -o -- '--state [^ ]*' /etc/NetworkManager/dispatcher.d/90-netgov | sort -u
 > ```
+>
+> ⚠️ **A hook that names the binary is not a hook that can execute it.** Before 2.13, `install`
+> baked `$HOME` into the generated hook — and under a passwordless-sudo policy that *resets*
+> `HOME`, that was `/root/bin/netgov`, which does not exist. The hook then failed on every carrier
+> event **silently**: the line ends `|| true`, so the dispatcher exits 0 and `systemctl` is clean.
+> An armed arbiter did nothing for hours and every content-based check said it was fine.
+> 2.13 takes the path from `os.Executable()`; 2.14 refuses to install a hook with a dead path.
 
 ### The gateway probe
 

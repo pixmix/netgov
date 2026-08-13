@@ -112,13 +112,18 @@ import (
 // 2.14 additionally REFUSES to install a hook whose binary path does not exist (c-001), turning
 // any residual case of that class from a silent no-op into an install-time error.
 //
+// 2.15 corrects the VERIFICATION the operating doc prescribed: it told custodians to confirm the
+// hook with `grep -c claim`, which proves the hook MENTIONS the verb, not that it can execute the
+// binary. c-001 followed it exactly and reported a dead arbiter as live. The proxy was in my
+// documentation, so the doc is where it had to be fixed.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.14"
+const artefactVersion = "netgov/2.15"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
