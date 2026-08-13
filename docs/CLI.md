@@ -110,6 +110,16 @@ associated to some *other* network is not a path to that address and is skipped.
 Both boot **disarmed**. Until the flag exists the arbiter only ever reports what it *would*
 do — `netgov claim` is safe to run at any time.
 
+**What enforces it (2.7+):** the NetworkManager dispatcher hook runs `claim apply` on link
+**up/down** — the carrier event is the one that changes claimant eligibility. Before 2.7
+arbitration ran only when a *pattern* was activated, which is the wrong trigger: a cable dying
+does not change which pattern is satisfiable, so an armed arbiter was never consulted on the
+event it exists for.
+
+> ⚠️ **Upgrading the binary is not enough — re-run `netgov install`** on each host. The hook on
+> disk dates from whenever it was last installed, so a host with an older hook stays armed but
+> unenforcing. Check: `grep -c claim /etc/NetworkManager/dispatcher.d/90-netgov`.
+
 **Safety rules it obeys:** claim-before-release (it only ever MOVES an address; if no
 claimant is eligible the current holder KEEPS it, so the box is never left with none) and
 a gratuitous ARP on hand-over, because a failover the segment cannot see is not a failover.

@@ -550,10 +550,40 @@ func cmdInstall() {
 	bin := filepath.Join(homeDir(), "bin", "netgov")
 	sp := statePath()
 	script := fmt.Sprintf(`#!/bin/sh
-# netgov NM dispatcher hook — re-apply host policy routing on link up/down.
+# netgov NM dispatcher hook — runs as root on link up/down.
 case "$2" in up|down|vpn-up|vpn-down) ;; *) exit 0 ;; esac
-%s __apply --state %s >> /var/log/netgov-dispatch.log 2>&1 || true
-`, bin, sp)
+LOG=/var/log/netgov-dispatch.log
+LOCK=/run/netgov-claim.lock
+
+# ---- 1. ADDRESS ARBITRATION (armed boxes only) --------------------------------------------
+# THIS IS WHAT MAKES THE ARM FLAG MEAN SOMETHING. Arbitration used to run only when a PATTERN
+# was activated, which is the wrong trigger: a cable dying does not change which pattern is
+# satisfiable, so the floor stayed active, no activation happened, and the arbiter was never
+# consulted on the one event it exists for. Pattern selection and claimant eligibility change
+# on DIFFERENT events. This hook is the carrier event.
+#
+# Runs BEFORE the routing re-apply below: arbitration decides which adapter holds the claimed
+# address, and the routing policy is computed from the addresses that result.
+#
+# "netgov claim apply" refuses unless /etc/netgov-claim.armed exists, and writes no state file,
+# so this is inert on an unarmed box and cannot leave a root-owned state.json behind.
+if [ -f /etc/netgov-claim.armed ]; then
+  # Arbitration MOVES an address, which itself produces further dispatcher events, so the hook
+  # can re-enter itself. mkdir is the atomic mutex. A stale lock (hook killed mid-run) must not
+  # disable arbitration forever, so anything older than a minute is cleared first.
+  [ -d "$LOCK" ] && find "$LOCK" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null
+  if mkdir "$LOCK" 2>/dev/null; then
+    trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+    echo "[$(date -Is)] $1 $2 -> claim apply" >> $LOG
+    %s claim apply --state %s >> $LOG 2>&1 || true
+  else
+    echo "[$(date -Is)] $1 $2 -> claim apply SKIPPED (already in progress)" >> $LOG
+  fi
+fi
+
+# ---- 2. re-apply host policy routing ------------------------------------------------------
+%s __apply --state %s >> $LOG 2>&1 || true
+`, bin, sp, bin, sp)
 	tmp := filepath.Join(os.TempDir(), "90-netgov")
 	must(os.WriteFile(tmp, []byte(script), 0o755))
 	dst := "/etc/NetworkManager/dispatcher.d/90-netgov"
