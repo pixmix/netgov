@@ -81,6 +81,14 @@ type stateView struct {
 	Patterns  []patternView `json:"patterns"`
 	Armed     string        `json:"armed"`
 	Active    string        `json:"active"`
+
+	// Version/Source are the artefact's own declaration, carried into the UI so the page can
+	// say WHICH BUILD drew it. Until now netgov declared its version only over `--version`, so
+	// the dashboard could not answer "is this the build I just installed?" — and the operator
+	// asked exactly that. Served from /api/state (Cache-Control: no-store), so a stale page
+	// cannot show a stale version: the two are fetched together or not at all.
+	Version string `json:"version"`
+	Source  string `json:"source"`
 }
 
 // patternRulesText renders a pattern's rules as one "selector via [fam]" line each
@@ -130,7 +138,8 @@ func famOf(u Uplink, fam string) famView {
 func buildView() stateView {
 	st := loadState(statePath())
 	v := stateView{DefaultV4: st.DefaultV4, DefaultV6: st.DefaultV6, Bridges: scanBridges(), WifiIf: wifiIfaces(),
-		Armed: st.Armed, Active: st.ActivePattern}
+		Armed: st.Armed, Active: st.ActivePattern,
+		Version: artefactVersion, Source: artefactSource()}
 	for _, p := range patternsByPrio(st) {
 		v4, v6 := normDefault(p.V4), normDefault(p.V6)
 		if v4 == "" {
@@ -591,7 +600,7 @@ input,select{background:#16181d;color:var(--fg);border:1px solid var(--ln);borde
 #log{white-space:pre-wrap;color:var(--mut);padding:10px 14px;font-size:12px}
 small{color:var(--mut)}
 </style></head><body>
-<header><h1>NETGOV</h1><span class="mut" id="sub">host switchboard</span>
+<header><h1>NETGOV</h1><span class="mut" id="ver" title="the build that drew this page">…</span><span class="mut" id="sub">host switchboard</span>
 <span style="flex:1"></span><button class="go" onclick="apply()">APPLY ▸</button>
 <button onclick="load()" title="refresh status">↻ refresh</button>
 <a href="/help" target="_blank" title="open the help page" style="color:var(--mut);border:1px solid var(--ln);border-radius:4px;padding:3px 10px;text-decoration:none;margin-left:6px">? help</a></header>
@@ -678,6 +687,9 @@ function render(){
  $('#pap').innerHTML=(S.aps||[]).map(a=>'<option value="'+a.name+'">'+a.name+' ('+a.ssid+'@'+a.dev+')</option>').join('')||'<option disabled>no APs — define one in the AP card</option>';
  $('#pv4').innerHTML=ulOpts('direct',[['direct','direct'],['block','block']]);
  $('#pv6').innerHTML=ulOpts('block',[['direct','direct'],['block','block']]);
+ // The version badge is drawn from the SAME /api/state payload as the data below it, so a
+ // cached page cannot show a fresh version (or vice versa) — they arrive together or not at all.
+ if(S.version){const v=$('#ver');v.textContent=S.version;v.title=(S.source||'')+' — the build that drew this page'}
  $('#sub').textContent='default v4='+(S.default_v4||'none')+'  v6='+(S.default_v6||'none')+(S.armed?'  · ARMED('+S.armed+')':'');
 }
 async function load(){S=await (await fetch('/api/state')).json();render()}
@@ -768,8 +780,16 @@ function md2html(md){const L=md.split('\n');let o=[],i=0;
   if(ln.startsWith('|')){let rows=[];while(i<L.length&&L[i].startsWith('|')){rows.push(L[i]);i++}
    let h=cells(rows[0]),b=rows.slice(2),t='<table><thead><tr>'+h.map(x=>'<th>'+inl(x)+'</th>').join('')+'</tr></thead><tbody>';
    b.forEach(r=>{t+='<tr>'+cells(r).map(c=>'<td>'+inl(c)+'</td>').join('')+'</tr>'});o.push(t+'</tbody></table>');continue}
-  if(/^\s*[-*] /.test(ln)){let it=[];while(i<L.length&&/^\s*[-*] /.test(L[i])){it.push('<li>'+inl(L[i].replace(/^\s*[-*] /,''))+'</li>');i++}o.push('<ul>'+it.join('')+'</ul>');continue}
-  if(/^\s*\d+\. /.test(ln)){let it=[];while(i<L.length&&/^\s*\d+\. /.test(L[i])){it.push('<li>'+inl(L[i].replace(/^\s*\d+\. /,''))+'</li>');i++}o.push('<ol>'+it.join('')+'</ol>');continue}
+  // Lists must ABSORB wrapped continuation lines. The docs are hard-wrapped at ~100 cols, so a
+  // bullet's text routinely continues on an indented line that does NOT start with "- ". Treating
+  // that line as a new block ended the list and emitted the remainder as its own <p> — which is
+  // what put line breaks in the middle of sentences on the help page (11 such lines in UI/CLI.md).
+  // A continuation = indented, non-blank, and not itself a new list item/heading/table/fence.
+  const cont=s=>/^\s+\S/.test(s)&&!/^\s*([-*] |\d+\. |#|>|\||---)/.test(s)&&s.slice(0,3)!==BT3;
+  if(/^\s*[-*] /.test(ln)){let it=[];while(i<L.length&&/^\s*[-*] /.test(L[i])){let t=L[i].replace(/^\s*[-*] /,'');i++;
+    while(i<L.length&&cont(L[i])){t+=' '+L[i].trim();i++}it.push('<li>'+inl(t)+'</li>')}o.push('<ul>'+it.join('')+'</ul>');continue}
+  if(/^\s*\d+\. /.test(ln)){let it=[];while(i<L.length&&/^\s*\d+\. /.test(L[i])){let t=L[i].replace(/^\s*\d+\. /,'');i++;
+    while(i<L.length&&cont(L[i])){t+=' '+L[i].trim();i++}it.push('<li>'+inl(t)+'</li>')}o.push('<ol>'+it.join('')+'</ol>');continue}
   if(ln.trim()===''){i++;continue}
   let p=[];while(i<L.length&&L[i].trim()!==''&&!/^(#|>|\||---|\s*[-*] |\s*\d+\. )/.test(L[i])&&L[i].slice(0,3)!==BT3){p.push(inl(L[i]));i++}
   o.push('<p>'+p.join(' ')+'</p>')}

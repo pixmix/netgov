@@ -76,6 +76,49 @@ and whose SSID trigger (if any) is in range, then whose default validates intern
 (poll up to ~45 s, debounced) — else the always-reachable `floor`. Watch it with
 `journalctl -u netgov-roled -f`.
 
+## Same-address arbitration (`claim`)
+
+One address, several adapters, **exactly one holder** — for a host that must keep one
+identity whether it is on cable or Wi-Fi (a static DHCP reservation reserved for BOTH
+of its MACs). The claim is a property **of a pattern**, because address identity belongs
+to a site, not to a box: it is inert unless that pattern is the active one.
+
+```
+netgov claim                                  # show the claim on the active pattern + who holds it
+netgov claim set <pattern> <address> <dev:prio[:ssid,ssid]>…
+netgov claim clear <pattern>
+```
+
+```
+netgov claim set LH 192.168.222.153 enp114s0:100 wlo1:50:CNNet
+```
+
+Highest-priority **eligible** adapter wins. Eligibility is **carrier + association only**
+(never NetworkManager's connectivity verdict — that is an input downstream of the arbiter's
+own output). A Wi-Fi claimant may list the SSIDs on which it is eligible: an adapter
+associated to some *other* network is not a path to that address and is skipped.
+
+**Two separate arm switches — do not confuse them:**
+
+| switch | what it arms | how |
+|---|---|---|
+| `netgov arm` | the **pattern** failover loop (`netgov-roled.service`) | `arm` / `disarm` |
+| `/etc/netgov-claim.armed` | the **address arbiter** | create/remove the file (root) |
+
+`netgov arm` does **not** arm arbitration, and the arbiter file does not start the loop.
+Both boot **disarmed**. Until the flag exists the arbiter only ever reports what it *would*
+do — `netgov claim` is safe to run at any time.
+
+**Safety rules it obeys:** claim-before-release (it only ever MOVES an address; if no
+claimant is eligible the current holder KEEPS it, so the box is never left with none) and
+a gratuitous ARP on hand-over, because a failover the segment cannot see is not a failover.
+
+> ⚠️ **Gating DHCP is necessary but not sufficient.** A standby that holds no lease still
+> answers ARP for the address (Linux `arp_ignore=0`: any interface answers for any local
+> address) and still competes to be the reply path. On a host with two NICs on one subnet,
+> also set `arp_ignore=1` + `arp_announce=2` with per-interface source routing, or keep the
+> standby off the segment. Verify from the SEGMENT that exactly one MAC answers.
+
 ## Links
 
 ```

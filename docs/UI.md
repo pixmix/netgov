@@ -119,15 +119,68 @@ automatically.
   AP and STA on one radio).
 - *rules* — one per line: `selector uplink [fam]`, where selector is a `domain` or
   `from:CIDR`. e.g. `api.example.com wifi` or `from:172.18.0.0/16 cable`.
+- *claim* — **same-address arbitration** (see below): `<address> <dev:prio[:ssid,…]>…`,
+  e.g. `192.168.222.153 enp114s0:100 wlo1:50:CNNet`. Leave empty for none.
 - **↧ snapshot current** — fill v4/v6/rules and tick the active AP from your *current*
   live config, so "save what I have now as a profile" is one click.
 
 Per row: **activate** (switch to it now), **edit** (load into the builder), **×**
-(delete). The badge by the title shows `ARMED · mode` or `disarmed`.
+(delete). The badge by the title shows `ARMED · mode` or `disarmed`. A row carrying a
+claim is marked with the address it can move (`⇄192.168.222.153`) — this is the one
+pattern property that can **move an address between adapters**, so it is visible at a
+glance rather than only on edit.
 
 CLI: `netgov pat-set <name> <prio> [--require a,b] [--ssid S --ssid-iface <uplink>]
 [--ap <name,…>] [--v4 …] [--v6 …] [--snapshot] [--floor]`, plus
 `pat-apply | pat-del | eval [--apply] | arm [--dry] | disarm`.
+
+---
+
+## Same-address arbitration (claims)
+
+For a host that must keep **one identity on either medium** — a DHCP reservation held
+for *both* its MACs, so it is the same address on cable or Wi-Fi. `dnsmasq` warns that
+this "will only work reliably if only one of the hardware addresses is active at any
+time and there is no way for dnsmasq to enforce this". netgov is that enforcer: **one
+address, N adapters, exactly one holder**, chosen by priority.
+
+The claim lives **on a pattern**, because address identity belongs to a site rather than
+to a box — you may be somewhere with none of your usual routers. It is **inert unless
+that pattern is active**.
+
+Set it in the **pattern builder's `claim` field**, in the same grammar as the CLI so the
+two cannot drift into dialects:
+
+```
+192.168.222.153 enp114s0:100 wlo1:50:CNNet
+   address        wired,      Wi-Fi, only when associated to CNNet
+                  priority100  priority 50
+```
+
+Highest-priority **eligible** adapter wins; eligibility is **carrier + association only**.
+Listing SSIDs on a Wi-Fi claimant matters: an adapter associated to a *different* network
+is not a path to that address. (Pointing one at an upstream WAN SSID would let the arbiter
+move the address somewhere it can never be reached.)
+
+**Two different arm switches, and `arm` is not the one you want here:**
+
+| switch | arms | how |
+|---|---|---|
+| **Arm** button / `netgov arm` | the **pattern** failover loop | button, or `arm`/`disarm` |
+| `/etc/netgov-claim.armed` | the **address arbiter** | create/remove the file as root |
+
+Arming the loop does **not** arm arbitration. Both boot disarmed, and until the flag
+exists the arbiter only reports what it *would* do (`netgov claim` is always safe to run).
+
+**Safety:** claim-before-release — it only ever *moves* an address, and if no claimant is
+eligible the current holder keeps it, so a box is never left with no address. Hand-over
+sends a gratuitous ARP, because a failover the segment cannot see is not a failover.
+
+> ⚠️ **Gating DHCP is necessary but not sufficient.** A standby holding no lease still
+> answers ARP for the address (Linux `arp_ignore=0`) and still competes to be the reply
+> path. On a host with two NICs on one subnet, also set `arp_ignore=1`/`arp_announce=2`
+> with per-interface source routing, or keep the standby off the segment — then verify
+> from the *segment* that exactly one MAC answers.
 
 ---
 
