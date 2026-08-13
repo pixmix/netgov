@@ -88,13 +88,19 @@ import (
 // The old "arping -c 2" passed on 1-of-2, i.e. a 42% chance of certifying a 76%-loss leg — and
 // under an any-reply rule more probes make a wrong pass MORE likely, so the rule had to change.
 //
+// 2.10 stops a nil slice blanking the dashboard. Go marshals nil as JSON `null`, the client mapped
+// over uplinks unguarded, and the throw killed EVERY later render step -- patterns table, claim
+// badge, version badge -- on precisely the uplink-less host configured for pure arbitration.
+// Fixed at three levels: buildView never emits null for a collection, the client guards, and
+// render() is wrapped so a render bug announces itself instead of truncating the page.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.9"
+const artefactVersion = "netgov/2.10"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

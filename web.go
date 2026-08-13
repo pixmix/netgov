@@ -178,6 +178,31 @@ func buildView() stateView {
 	for _, a := range st.APs {
 		v.APs = append(v.APs, apView{Name: a.Name, Dev: a.Dev, SSID: a.SSID, Band: a.Band, On: a.On, Active: apActive(a.Dev) == "up"})
 	}
+	// A nil slice marshals as JSON `null`, not `[]`. That is how ms-rosy's uplink-less dashboard
+	// died: ulOpts() mapped over a null uplinks array, threw, and every render step AFTER it never
+	// ran — the patterns table, the claim badge, and the version badge the operator had asked
+	// about four times. One box configured for pure arbitration (no uplinks, by our own design)
+	// was therefore the one box whose safety surface silently blanked.
+	//
+	// Guarding the client is necessary but this is the fix that generalises: EVERY consumer of
+	// /api/state — this page, the dashboard tiles, any script — gets an array where the schema
+	// says array. An empty collection is a fact; null is an absence, and they are not the same.
+	if v.Uplinks == nil {
+		v.Uplinks = []uplinkView{}
+	}
+	if v.APs == nil {
+		v.APs = []apView{}
+	}
+	if v.Patterns == nil {
+		v.Patterns = []patternView{}
+	}
+	if v.Bridges == nil {
+		v.Bridges = []bridgeInfo{}
+	}
+	if v.WifiIf == nil {
+		v.WifiIf = []string{}
+	}
+
 	for _, r := range st.Rules {
 		rv := ruleView{Via: r.Via, Fam: r.Fam}
 		if r.Domain != "" {
@@ -186,6 +211,9 @@ func buildView() stateView {
 			rv.Kind, rv.Sel, rv.Key = "src", r.From, "from:"+r.From
 		}
 		v.Rules = append(v.Rules, rv)
+	}
+	if v.Rules == nil {
+		v.Rules = []ruleView{}
 	}
 	return v
 }
@@ -723,12 +751,28 @@ small{color:var(--mut)}
 let S={uplinks:[],aps:[],wifi_if:[],rules:[],bridges:[],default_v4:"",default_v6:"",patterns:[],armed:"",active:""};
 const $=s=>document.querySelector(s);
 function ulOpts(cur,extra){let o=(extra||[]).map(e=>'<option value="'+e[0]+'" '+(e[0]===cur?'selected':'')+'>'+e[1]+'</option>').join('');
- return o+S.uplinks.map(u=>'<option '+(u.name===cur?'selected':'')+'>'+u.name+'</option>').join('')}
+ return o+(S.uplinks||[]).map(u=>'<option '+(u.name===cur?'selected':'')+'>'+u.name+'</option>').join('')}
 function famOpts(cur){return ['both','4','6'].map(f=>'<option '+(f===(cur||'both')?'selected':'')+'>'+f+'</option>').join('')}
 function fcell(f){if(!f.up)return '<span class="down">—</span>';
  return '<span class="up">up</span> <span class="mut">'+(f.src||'-')+' gw '+(f.gw||'-')+'</span> '+(f.internet?'<span class="pill up">internet ✓</span>':'<span class="pill warn">no internet</span>')}
+// A THROWN ERROR IN render() USED TO BLANK EVERYTHING AFTER THE THROW POINT, SILENTLY.
+// On a host with no uplinks, ulOpts() mapped over a null uplinks array and every later step — patterns
+// table, claim badge, version badge — simply never ran. The page looked deployed-but-empty, which
+// is indistinguishable from a bad deploy, and on the one box configured for pure arbitration it
+// hid the badge that says whether the arbiter can move an address.
+//
+// The null guards below and in buildView fix THAT instance; this catch fixes the CLASS. A render
+// bug must announce itself rather than truncate the page: partial UI that looks whole is the worst
+// failure mode a status dashboard has.
 function render(){
- $('#ut tbody').innerHTML=S.uplinks.map(u=>'<tr><td class="acc">'+u.name+'</td><td>'+u.dev+'</td><td>'+fcell(u.v4)+
+ try{ renderBody() }catch(e){
+   log('RENDER ERROR: '+(e&&e.message?e.message:e)+' — the page below may be incomplete. This is a bug; the data in /api/state is unaffected.');
+   const v=$('#ver'); if(v&&S&&S.version)v.textContent=S.version;
+   throw e
+ }
+}
+function renderBody(){
+ $('#ut tbody').innerHTML=(S.uplinks||[]).map(u=>'<tr><td class="acc">'+u.name+'</td><td>'+u.dev+'</td><td>'+fcell(u.v4)+
   '</td><td>'+fcell(u.v6)+'</td><td class="mut">'+u.table+'</td><td><button title="restore link to NM profile" onclick="reapply(\''+u.dev+'\')">↺</button> <button onclick="delUp(\''+u.name+'\')">×</button></td></tr>').join('')||'<tr><td colspan=6 class=mut>none — run “netgov init”</td></tr>';
  const dr=(S.rules||[]).filter(r=>r.kind==='dest');
  $('#rt tbody').innerHTML=(dr.length?dr:[]).map(r=>'<tr><td>'+r.sel+'</td><td class="acc">'+r.via+'</td><td class="mut">['+r.fam+']</td><td class="mut">'+((r.ips||[]).join(' ')||'unresolved')+'</td><td><button onclick="delRule({domain:\''+r.sel+'\'})">×</button></td></tr>').join('')||'<tr><td class=mut colspan=5>none</td></tr>';
@@ -751,8 +795,8 @@ function render(){
   $('#clnote').textContent = cl
     ? 'active pattern '+ap.name+' can move '+cl.address+' between '+(cl.claimants||[]).map(c=>c.dev).join(' / ')
     : 'no claim on the active pattern — arming changes nothing until one is declared';}
- $('#prq').innerHTML=S.uplinks.map(u=>'<option>'+u.name+'</option>').join('');
- $('#pssidif').innerHTML=S.uplinks.map(u=>'<option'+(u.name==='WiFi0'?' selected':'')+'>'+u.name+'</option>').join('');
+ $('#prq').innerHTML=(S.uplinks||[]).map(u=>'<option>'+u.name+'</option>').join('');
+ $('#pssidif').innerHTML=(S.uplinks||[]).map(u=>'<option'+(u.name==='WiFi0'?' selected':'')+'>'+u.name+'</option>').join('');
  $('#pap').innerHTML=(S.aps||[]).map(a=>'<option value="'+a.name+'">'+a.name+' ('+a.ssid+'@'+a.dev+')</option>').join('')||'<option disabled>no APs — define one in the AP card</option>';
  $('#pv4').innerHTML=ulOpts('direct',[['direct','direct'],['block','block']]);
  $('#pv6').innerHTML=ulOpts('block',[['direct','direct'],['block','block']]);
