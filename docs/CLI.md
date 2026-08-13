@@ -104,7 +104,7 @@ associated to some *other* network is not a path to that address and is skipped.
 | switch | what it arms | how |
 |---|---|---|
 | `netgov arm` | the **pattern** failover loop (`netgov-roled.service`) | `arm` / `disarm` |
-| `/etc/netgov-claim.armed` | the **address arbiter** | create/remove the file (root) |
+| `/etc/netgov-claim.armed` | the **address arbiter** | `netgov claim arm` / `claim disarm` |
 
 `netgov arm` does **not** arm arbitration, and the arbiter file does not start the loop.
 Both boot **disarmed**. Until the flag exists the arbiter only ever reports what it *would*

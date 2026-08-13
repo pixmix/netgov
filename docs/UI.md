@@ -170,7 +170,7 @@ move the address somewhere it can never be reached.)
 | switch | arms | how |
 |---|---|---|
 | **Arm** button / `netgov arm` | the **pattern** failover loop | button, or `arm`/`disarm` |
-| `/etc/netgov-claim.armed` | the **address arbiter** | create/remove the file as root |
+| `/etc/netgov-claim.armed` | the **address arbiter** | `netgov claim arm` / `claim disarm` — **CLI only, there is no dashboard control** |
 
 Arming the loop does **not** arm arbitration. Both boot disarmed, and until the flag
 exists the arbiter only reports what it *would* do (`netgov claim` is always safe to run).
