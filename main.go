@@ -83,13 +83,18 @@ import (
 // Adds docs/OPERATING.md (embedded in /help): a verb table with MUTATES?/NEEDS-ROOT? columns, the
 // ownership/escalation model, what "armed" enforces, and the pure-arbitration worked example.
 //
+// 2.9 replaces the gateway probe's ANY-REPLY test with a LOSS FRACTION over 10 probes against a
+// 10% ceiling, reports the fraction rather than a verdict, and probes claimants concurrently.
+// The old "arping -c 2" passed on 1-of-2, i.e. a 42% chance of certifying a 76%-loss leg — and
+// under an any-reply rule more probes make a wrong pass MORE likely, so the rule had to change.
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.8"
+const artefactVersion = "netgov/2.9"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

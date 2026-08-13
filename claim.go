@@ -39,6 +39,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Claimant is one adapter's bid for the claim address.
@@ -132,26 +133,37 @@ func devSSID(dev string) string {
 	return ""
 }
 
-// devGatewayAnswers reports whether the LAN gateway answers ARP **out of this specific
-// interface**. This exists because CARRIER IS NOT A HEALTH SIGNAL.
+// Probe parameters for the gateway reachability test. See devGatewayAnswers.
 //
-// 2026-08-13: a Raspberry Pi fell off its support and hung by its own RJ45 connectors. The
-// mechanical load on the contacts lost 80-95% of frames while the link still negotiated
-// 1000/full — carrier 1, error counters 0 at BOTH ends (a frame lost on the wire never arrives
-// to be counted, and a tx counter counts what was SENT, not what LANDED). An arbiter trusting
-// carrier would have found that leg "eligible", outranked a working wireless leg, and MOVED THE
-// ADDRESS ONTO THE BROKEN CABLE — failing at its one job while looking correct.
+// N=10 with a 10% ceiling, NOT the old "-c 2, any reply". arping exits 0 if ANY reply arrives, so
+// the old test passed on 1-of-2 — a 1-loss^2 = 42% chance of certifying c-016's measured 76%-loss
+// leg, and under an any-reply rule MORE PROBES MAKE A WRONG PASS MORE LIKELY (N=5 -> 75%,
+// N=10 -> 94%). Anyone "hardening" it by raising -c would have weakened it. The rule had to change,
+// not the sample size.
+const (
+	claimProbeCount    = 10 // arping -i takes whole seconds on iputils, so this is ~10s
+	claimProbeDeadline = 14 // must exceed count, or -w truncates and healthy legs read as lossy
+	claimMaxLossPct    = 10
+)
+
+// arpingStats parses arping's OWN REPORT rather than its exit code.
 //
-// Why this does not reintroduce the circularity invariant 3 forbids: it is a MEASUREMENT taken
-// on the interface itself, not a verdict computed by something downstream of this arbiter's own
-// output. NetworkManager's connectivity flag reflects the default route, which the arbiter moves,
-// so consulting it means reading your own output as your input (the 2026-08-10 flap). An ARP
-// exchange with the gateway needs no address on the interface, ignores the routing table
-// entirely, and answers the only question that matters: can frames actually cross this link.
-//
-// Fail-OPEN by design: if arping is missing or no gateway is known we return true, because a
-// missing probe must never de-address a box. Losing the ability to test a leg is not evidence
-// against it (the same reasoning as invariant 4, claim-before-release).
+// The exit code is a proxy and it lies in both directions: it is 0 if any single reply arrives
+// (hiding 76% loss), and this very session observed `arping -q ... -i 0.1` exit 0 while printing
+// "invalid argument" and probing nothing at all. The counts are the measurement; rc is an opinion.
+func arpingStats(out string) (sent, recv int, ok bool) {
+	for _, ln := range strings.Split(out, "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 && f[0] == "Sent" {
+			sent, _ = strconv.Atoi(f[1])
+		}
+		if len(f) >= 2 && f[0] == "Received" {
+			recv, _ = strconv.Atoi(f[1])
+		}
+	}
+	return sent, recv, sent > 0
+}
+
 // defaultGateway returns the LAN gateway from the MAIN routing table. Used only as the ARP
 // probe target for a claimant with no lease of its own; it is never used to make a routing
 // decision, so reading the main table here does not make eligibility depend on the arbiter's
@@ -174,6 +186,30 @@ func defaultGateway() string {
 	return ""
 }
 
+// devGatewayAnswers measures the LOSS FRACTION to the LAN gateway out of this specific interface.
+//
+// WHY THIS EXISTS: CARRIER IS NOT A HEALTH SIGNAL. 2026-08-13: a Raspberry Pi fell off its support
+// and hung by its own RJ45 connectors. The mechanical load lost 80-95% of frames while the link
+// still negotiated 1000/full — carrier 1, error counters 0 at BOTH ends (a frame lost on the wire
+// never arrives to be counted, and a tx counter counts what was SENT, not what LANDED). An arbiter
+// trusting carrier finds that leg eligible, outranks a working wireless leg, and MOVES THE ADDRESS
+// ONTO THE BROKEN CABLE — failing at its one job while looking correct.
+//
+// WHY A FRACTION AND NOT A YES/NO: this fault does not look slow, it looks PERFECT, INTERMITTENTLY.
+// Measured survivors on the bad leg ran 0.31-0.83 ms — better than many healthy links. Low latency
+// on the survivors is characteristic of the fault, not evidence against it, so any test that asks
+// "did something come back?" reads it as textbook health. Only the ratio distinguishes them.
+//
+// Why this is not the circularity invariant 3 forbids: it is a MEASUREMENT taken on the interface
+// itself, not a verdict computed downstream of this arbiter's own output. NetworkManager's
+// connectivity flag reflects the default route, which the arbiter moves, so consulting it means
+// reading your own output as your input. An ARP exchange needs no address on the interface and
+// ignores the routing table, so a lease-less STANDBY is testable — which it must be, since you
+// cannot fail over to a leg whose health you were never able to measure.
+//
+// Fail-OPEN only when the probe could not RUN (no arping, no known gateway, unparseable output).
+// A measured bad result fails CLOSED. Those are different things: losing the ability to test a leg
+// is not evidence against it (invariant 4), but measuring it and finding it broken is.
 func devGatewayAnswers(dev string) (bool, string) {
 	// Prefer the gateway this interface was itself offered. A STANDBY claimant may hold no lease
 	// (that is the point of gating it), so fall back to the LAN default gateway — every claimant
@@ -185,15 +221,23 @@ func devGatewayAnswers(dev string) (bool, string) {
 	if gw == "" {
 		return true, "" // nothing to probe against — do not penalise
 	}
-	// -I binds the probe to THIS interface; -c 2 tolerates a single lost frame; -w 2 bounds it
-	// so a dead leg cannot stall an evaluation cycle.
-	if _, err := run("arping", "-I", dev, "-c", "2", "-w", "2", gw); err != nil {
-		if _, lookErr := exec.LookPath("arping"); lookErr != nil {
-			return true, "" // tool absent: fail open, and say nothing misleading
-		}
-		return false, "gateway " + gw + " does not answer on " + dev
+	if _, err := exec.LookPath("arping"); err != nil {
+		return true, "" // tool absent: cannot test, fail open
 	}
-	return true, ""
+	out, _ := run("arping", "-I", dev, "-c", strconv.Itoa(claimProbeCount),
+		"-w", strconv.Itoa(claimProbeDeadline), gw) // rc deliberately ignored — see arpingStats
+	sent, recv, ok := arpingStats(out)
+	if !ok {
+		return true, "gateway probe unreadable — NOT verified"
+	}
+	loss := 100 * (sent - recv) / sent
+	stat := fmt.Sprintf("%d/%d replies to %s, %d%% loss", recv, sent, gw, loss)
+	if loss > claimMaxLossPct {
+		// Report the FRACTION, not the verdict: "3/20 replies (85% loss)" tells an operator what
+		// happened and is checkable; "not eligible" throws the measurement away.
+		return false, stat + " — over the " + strconv.Itoa(claimMaxLossPct) + "% ceiling"
+	}
+	return true, stat
 }
 
 // claimantEligible applies invariant 2 and nothing else.
@@ -202,17 +246,23 @@ func claimantEligible(c Claimant) (bool, string) {
 		return false, "no carrier"
 	}
 	// Carrier says the PHY agreed on a link; it does not say frames cross it. See above.
-	if ok, why := devGatewayAnswers(c.Dev); !ok {
-		return false, why
+	ok, stat := devGatewayAnswers(c.Dev)
+	if !ok {
+		return false, stat
+	}
+	// Carry the MEASUREMENT into the pass reason, not just the verdict. "10/10 replies, 0% loss"
+	// is checkable by an operator and shows the probe actually ran; "carrier up" hides both.
+	if stat == "" {
+		stat = "carrier up, gateway not probed"
 	}
 	if len(c.SSIDs) == 0 {
-		return true, "carrier up"
+		return true, stat
 	}
 	if !devIsWireless(c.Dev) {
 		// Config error rather than a state: an SSID list on a wired adapter can never be
 		// satisfied meaningfully. Carrier is the whole test; say so loudly instead of
 		// silently comparing against whatever nmcli happens to return.
-		return true, "carrier up (SSID list ignored — " + c.Dev + " is not wireless)"
+		return true, stat + " (SSID list ignored — " + c.Dev + " is not wireless)"
 	}
 	cur := devSSID(c.Dev)
 	if cur == "" {
@@ -220,7 +270,7 @@ func claimantEligible(c Claimant) (bool, string) {
 	}
 	for _, s := range c.SSIDs {
 		if strings.EqualFold(strings.TrimSpace(s), cur) {
-			return true, "associated to " + cur
+			return true, "on " + cur + "; " + stat
 		}
 	}
 	return false, "associated to " + cur + " (not a listed SSID)"
@@ -268,8 +318,30 @@ func claimEvaluate(cl *Claim) claimVerdict {
 	v := claimVerdict{}
 	cs := append([]Claimant(nil), cl.Claimants...)
 	sort.SliceStable(cs, func(i, j int) bool { return cs[i].Priority > cs[j].Priority })
-	for _, c := range cs {
-		ok, why := claimantEligible(c)
+
+	// Probe every claimant CONCURRENTLY. The gateway loss test is ~10s of wall time by
+	// construction (arping's -i takes whole seconds on iputils, so N probes cost N seconds), and
+	// this runs from the NM dispatcher hook on a carrier event. Serially it would be 10s PER
+	// claimant and hold the hook for the sum; concurrently the cost is the slowest single leg.
+	// The probes are independent reads on different interfaces, so there is nothing to serialise.
+	type res struct {
+		ok  bool
+		why string
+	}
+	rs := make([]res, len(cs))
+	var wg sync.WaitGroup
+	for i := range cs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ok, why := claimantEligible(cs[i])
+			rs[i] = res{ok, why}
+		}(i)
+	}
+	wg.Wait()
+
+	for i, c := range cs {
+		ok, why := rs[i].ok, rs[i].why
 		holds := devHoldsAddr(c.Dev, cl.Address)
 		if holds {
 			v.Holders = append(v.Holders, c.Dev)

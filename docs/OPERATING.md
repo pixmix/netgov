@@ -87,9 +87,27 @@ exists for.
 > grep -c claim /etc/NetworkManager/dispatcher.d/90-netgov     # 0 = old hook
 > ```
 
-Arbitration also needs **`arping`** (`iputils-arping`) to test whether a claimant's gateway actually
-answers. Without it that check fails open and eligibility falls back to carrier + association — and
-carrier is not a health signal: a cable can negotiate 1000/full and still lose most frames.
+### The gateway probe
+
+Eligibility measures the **loss fraction** to the gateway out of each claimant's own interface:
+10 ARP probes, **rejected above 10% loss**, reported as the fraction —
+`enp114s0: 10/10 replies to 192.168.222.1, 0% loss`.
+
+Needs **`arping`** (`iputils-arping`). Without it the check **fails open** and eligibility falls
+back to carrier + association.
+
+> ⚠️ **Do not "harden" this by raising the probe count under an any-reply rule.** Until 2.9 the test
+> was `arping -c 2` and passed if *any* reply arrived — a `1 − loss^N` chance of accepting a bad leg,
+> so **more probes made a wrong pass MORE likely**: N=2 → 42%, N=5 → 75%, N=10 → 94% on a 76%-loss
+> leg. The rule is what matters, not the sample size.
+>
+> **This fault does not look slow, it looks perfect intermittently.** Measured survivors on a leg
+> losing 76% of frames ran 0.31–0.83 ms — better than many healthy links. Low latency on the
+> survivors is characteristic of the fault, not evidence against it, which is why only a ratio
+> separates them.
+
+Cost: ~10 s of wall time (arping's `-i` takes whole seconds), claimants probed **concurrently** so
+it is the slowest leg, not the sum. That is the price of not moving an address onto a dead cable.
 
 ---
 
