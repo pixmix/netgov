@@ -1497,9 +1497,20 @@ func applyMACOps(cl *Claim, ops []macOp) []string {
 			_ = recordClaimFailure(cl.Address)
 			return log
 		}
-		// `connection up` re-activates in place; the MAC is applied on activation.
+		// `connection up` re-activates in place; the MAC applies on activation. It CANNOT succeed
+		// on a leg with no carrier — which is the ordinary failover case, a cable pulled out. That
+		// is not a failure: `connection modify` has already written the MAC, so it takes effect
+		// whenever the link returns, and a leg that cannot transmit cannot collide with anything
+		// meanwhile. Treating it as fatal would abort the swap before the winner ever took the
+		// identity, i.e. failover would work only when the failed leg was not really failed.
 		if err := runPriv("nmcli", "connection", "up", prof); err != nil {
-			log = append(log, "WARN: "+prof+" did not come back up after the MAC change ("+err.Error()+")")
+			if !devCarrier(o.Dev) {
+				log = append(log, "staged: "+o.Why+" (no carrier on "+o.Dev+
+					" — the MAC is written and applies when the link returns)")
+				continue
+			}
+			log = append(log, "ABORT: "+prof+" did not come back up after the MAC change ("+err.Error()+
+				") and it still has carrier — refusing to continue with a possible MAC conflict")
 			_ = recordClaimFailure(cl.Address)
 			return log
 		}
