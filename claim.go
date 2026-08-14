@@ -757,7 +757,15 @@ func devHoldsAddr(dev, addr string) bool {
 	return false
 }
 
-// devProfile returns the NM connection profile currently active on dev, or "".
+// devProfile returns the NM connection profile for dev — the ACTIVE one, or failing that the
+// profile BOUND to that interface.
+//
+// The fallback is not cosmetic. `GENERAL.CONNECTION` is empty for a device with no active
+// connection, which is precisely the state of a leg whose cable has been pulled — so the identity
+// swap logged "no active profile on enp114s0 — skipped" and never wrote the parked MAC. The leg
+// then came back up still wearing the identity that the wifi had meanwhile assumed: two NICs, one
+// MAC, exactly the collision the parking exists to prevent, reached by the failover path itself.
+// Found by pulling a cable rather than by reading the code.
 func devProfile(dev string) string {
 	out, err := run("nmcli", "-t", "-f", "GENERAL.CONNECTION", "device", "show", dev)
 	if err != nil {
@@ -769,6 +777,25 @@ func devProfile(dev string) string {
 			if v != "" && v != "--" {
 				return v
 			}
+		}
+	}
+	return profileForIface(dev)
+}
+
+// profileForIface finds the connection bound to an interface even when nothing is active on it.
+func profileForIface(dev string) string {
+	out, err := run("nmcli", "-t", "-f", "NAME", "connection", "show")
+	if err != nil {
+		return ""
+	}
+	for _, name := range strings.Split(out, "\n") {
+		name = strings.TrimSpace(strings.ReplaceAll(name, "\\:", ":"))
+		if name == "" {
+			continue
+		}
+		if v, e := run("nmcli", "-g", "connection.interface-name", "connection", "show", name); e == nil &&
+			strings.TrimSpace(v) == dev {
+			return name
 		}
 	}
 	return ""
@@ -973,6 +1000,21 @@ func claimReconcile(cl *Claim, dry bool) []string {
 			perm[c.Dev], cur[c.Dev] = devPermMAC(c.Dev), devCurrentMAC(c.Dev)
 		}
 		ops := claimMACPlan(cl, v.Winner, perm, cur)
+		// NOT FROM INSIDE THE NM DISPATCHER. `nmcli connection modify` re-enters NetworkManager
+		// while NM is still processing the dispatcher event that invoked us, and it fails: measured
+		// `ABORT: could not set 802-11-wireless.cloned-mac-address on CNNet (exit status 1)` on the
+		// hook path, while the identical command from the systemd timer succeeded seconds later.
+		// Worse than failing, it recorded a 300s cooldown that then SUPPRESSED the timer — the one
+		// path that could have done the job. So: plan, log, defer, and leave no cooldown behind.
+		// The liveness timer picks it up within 60s and that is the correct owner of the work.
+		if len(ops) > 0 && !dry && fromDispatcher() {
+			log = append(log, "DEFERRED: NetworkManager will not accept a connection change from"+
+				" inside its own dispatcher; the claim-watch timer applies this within 60s")
+			for _, o := range ops {
+				log = append(log, "  would: "+o.Why)
+			}
+			return log
+		}
 		if len(ops) == 1 && ops[0].Refuse {
 			return append(log, "ABORT: "+ops[0].Why+" — nothing changed")
 		}
@@ -1542,4 +1584,18 @@ func macWinner(ops []macOp) string {
 		return ""
 	}
 	return ops[len(ops)-1].Dev
+}
+
+// fromDispatcher reports whether we were invoked by NetworkManager's dispatcher, where a
+// `connection modify` re-enters NM and fails. The generated hook passes the flag explicitly;
+// NM's own environment is the fallback so an OLD hook (installed before this build) is still
+// recognised — otherwise upgrading the binary without re-running `netgov install` would leave
+// exactly the failure this detects.
+func fromDispatcher() bool {
+	for _, a := range os.Args {
+		if a == "--from-dispatcher" {
+			return true
+		}
+	}
+	return os.Getenv("NM_DISPATCHER_ACTION") != "" || os.Getenv("CONNECTION_UUID") != ""
 }

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // The first tests in this repo, and they exist because of a rule this project wrote:
 //
@@ -312,5 +315,21 @@ func TestClaimMACPlan_RefusesWhenPermanentMACIsUnknown(t *testing.T) {
 	ops := claimMACPlan(idClaim(), "wlan0", perm, cur)
 	if len(ops) != 1 || !ops[0].Refuse {
 		t.Fatalf("an unreadable permanent MAC must refuse to plan, not guess; got %+v", ops)
+	}
+}
+
+// --from-dispatcher must be recognised, because MAC ops from inside NM's dispatcher fail and then
+// poison the timer with a cooldown. Asserting the detector rather than the behaviour it guards:
+// the guard is only as good as this returning true.
+func TestFromDispatcher_RecognisesTheExplicitFlag(t *testing.T) {
+	old := os.Args
+	defer func() { os.Args = old }()
+	os.Args = []string{"netgov", "claim", "apply", "--from-dispatcher", "--state", "/x"}
+	if !fromDispatcher() {
+		t.Fatal("the explicit flag must be recognised — the generated hook passes it")
+	}
+	os.Args = []string{"netgov", "claim", "apply", "--state", "/x"}
+	if fromDispatcher() && os.Getenv("NM_DISPATCHER_ACTION") == "" && os.Getenv("CONNECTION_UUID") == "" {
+		t.Fatal("a hand-run must NOT look like a dispatcher run, or MAC ops never apply at all")
 	}
 }

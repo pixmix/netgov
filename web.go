@@ -706,7 +706,7 @@ if [ -f /etc/netgov-claim.armed ]; then
   if mkdir "$LOCK" 2>/dev/null; then
     trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
     echo "[$(date -Is)] $1 $2 -> claim apply" >> $LOG
-    %s claim apply --state %s >> $LOG 2>&1 || true
+    %s claim apply --from-dispatcher --state %s >> $LOG 2>&1 || true
   else
     echo "[$(date -Is)] $1 $2 -> claim apply SKIPPED (already in progress)" >> $LOG
   fi
