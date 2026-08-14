@@ -320,3 +320,22 @@ func restoreNMProps(st *State) []string {
 	st.NMSaved = nil
 	return out
 }
+
+// liveNeverDefault reports what NetworkManager ACTUALLY has for a device's active profile —
+// "yes", "no", or "" when it cannot be read.
+//
+// This is the measured half of the pair. `CanDefault` is netgov's intention and they diverge
+// whenever netgov is not managing the property, which is the default. Reporting only the
+// intention is how the dashboard came to show "auto" on a NIC that could not carry a default
+// route at all — the exact invisibility that motivated 2.21, surviving inside its own fix.
+func liveNeverDefault(dev string) string {
+	prof := devProfile(dev)
+	if prof == "" {
+		return ""
+	}
+	v, ok := nmGet(prof, "ipv4.never-default")
+	if !ok {
+		return ""
+	}
+	return v
+}

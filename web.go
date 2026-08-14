@@ -44,6 +44,13 @@ type uplinkView struct {
 	// CanDefault is tri-state and must survive as null in JSON — omitempty would erase the
 	// difference between "unmanaged" and "may not carry the default", which are opposite states.
 	CanDefault *bool `json:"can_default"`
+
+	// NeverDefaultLive is what NETWORKMANAGER ACTUALLY HAS right now, which is a different fact
+	// from CanDefault (what netgov intends). They agree only while netgov manages the property.
+	// Shipping CanDefault alone reproduced the bug 2.21 existed to fix: on WS the card read "auto"
+	// while the wired profile was `never-default yes` and genuinely could not carry a default
+	// route. A control that shows only its own setting hides the state it controls. (2.23)
+	NeverDefaultLive string `json:"never_default_live"`
 }
 type ruleView struct {
 	Key  string   `json:"key"`  // domain or "from:..."
@@ -204,7 +211,7 @@ func buildView() stateView {
 		if servingDev(st, u.Dev) {
 			continue // shadowed by an AP
 		}
-		v.Uplinks = append(v.Uplinks, uplinkView{Name: u.Name, Dev: u.Dev, Table: u.Table, V4: famOf(u, "4"), V6: famOf(u, "6"), CanDefault: u.CanDefault})
+		v.Uplinks = append(v.Uplinks, uplinkView{Name: u.Name, Dev: u.Dev, Table: u.Table, V4: famOf(u, "4"), V6: famOf(u, "6"), CanDefault: u.CanDefault, NeverDefaultLive: liveNeverDefault(u.Dev)})
 	}
 	for _, a := range st.APs {
 		v.APs = append(v.APs, apView{Name: a.Name, Dev: a.Dev, SSID: a.SSID, Band: a.Band, On: a.On, Active: apActive(a.Dev) == "up"})
@@ -890,8 +897,18 @@ function renderBody(){
    const cd=(u.can_default===true?'yes':(u.can_default===false?'no':'auto'));
    const sel='<select title="may this uplink carry the DEFAULT ROUTE? netgov owns ipv4.never-default; auto = leave it to NetworkManager. Takes effect on apply; netgov reset restores the original." onchange="setDefRoute(\''+u.name+'\',this.value)">'
      +['yes','no','auto'].map(v=>'<option value="'+v+'"'+(v===cd?' selected':'')+'>'+(v==='auto'?'auto':v)+'</option>').join('')+'</select>';
+   // The LIVE value beside the control. Without this the card showed "auto" on a NIC that
+   // NetworkManager was barring from the default route entirely — a control that displays only
+   // its own setting hides the state it exists to control. Only flagged when it BLOCKS, since
+   // "can carry a default route" is the unremarkable case. (2.23)
+   const live=u.never_default_live;
+   const liveTag = live==='yes'
+     ? ' <span class="pill" style="color:var(--warn);border-color:var(--warn)" title="NetworkManager has ipv4.never-default=yes on this profile: it cannot carry the default route, so no internet egress leaves via this NIC. LAN traffic on its own subnet still does.">⃠ no egress</span>'
+     : (cd!=='auto'&&live&&((cd==='yes')!==(live==='no'))
+        ? ' <span class="pill" style="color:var(--warn);border-color:var(--warn)" title="netgov wants '+cd+' but NetworkManager still has never-default='+live+' — not applied yet. Run netgov plan, then apply.">pending apply</span>'
+        : '');
    return '<tr><td class="acc">'+u.name+'</td><td>'+u.dev+'</td><td>'+fcell(u.v4)+
-  '</td><td>'+fcell(u.v6)+'</td><td class="mut">'+u.table+'</td><td>'+sel+'</td><td><button title="restore link to NM profile" onclick="reapply(\''+u.dev+'\')">↺</button> <button onclick="delUp(\''+u.name+'\')">×</button></td></tr>'}).join('')||'<tr><td colspan=7 class=mut>none — run “netgov init”</td></tr>';
+  '</td><td>'+fcell(u.v6)+'</td><td class="mut">'+u.table+'</td><td>'+sel+liveTag+'</td><td><button title="restore link to NM profile" onclick="reapply(\''+u.dev+'\')">↺</button> <button onclick="delUp(\''+u.name+'\')">×</button></td></tr>'}).join('')||'<tr><td colspan=7 class=mut>none — run “netgov init”</td></tr>';
  const dr=(S.rules||[]).filter(r=>r.kind==='dest');
  $('#rt tbody').innerHTML=(dr.length?dr:[]).map(r=>'<tr><td>'+r.sel+'</td><td class="acc">'+r.via+'</td><td class="mut">['+r.fam+']</td><td class="mut">'+((r.ips||[]).join(' ')||'unresolved')+'</td><td><button onclick="delRule({domain:\''+r.sel+'\'})">×</button></td></tr>').join('')||'<tr><td class=mut colspan=5>none</td></tr>';
  const sr=(S.rules||[]).filter(r=>r.kind==='src');

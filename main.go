@@ -152,6 +152,13 @@ import (
 // level up, and it misreads in the dangerous direction — a reader who sees 2.21 and concludes
 // netgov owns the metric will therefore NOT look at NM, which is still deciding.
 //
+// 2.23 shows what NetworkManager ACTUALLY has for never-default beside netgov's setting for it.
+// 2.22 shipped the control and not the state: the Uplinks card read "auto" on a NIC whose profile
+// had `never-default yes` and therefore could not carry a default route at all. The operator asked
+// where to see it, which is the only reason it was caught — a control that displays only its own
+// setting hides the state it exists to control, which is the exact invisibility 2.21 was written
+// to end, surviving inside its own fix.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -163,7 +170,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.22"
+const artefactVersion = "netgov/2.23"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -1492,8 +1499,15 @@ func cmdUplink(st *State, args []string) {
 	switch args[0] {
 	case "list":
 		for _, u := range st.Uplinks {
-			fmt.Printf("  %-8s dev=%-16s table=%d gw=%-15s default-route=%s\n",
-				u.Name, u.Dev, u.Table, dash(u.Gateway), canDefaultStr(u.CanDefault))
+			live := liveNeverDefault(u.Dev)
+			note := ""
+			if live == "yes" {
+				// The measured state, not netgov's intention. Reported whenever it BLOCKS,
+				// including (especially) when netgov is not managing the property.
+				note = "   [NM: never-default=yes -> NO default route via this NIC]"
+			}
+			fmt.Printf("  %-8s dev=%-16s table=%d gw=%-15s default-route=%s%s\n",
+				u.Name, u.Dev, u.Table, dash(u.Gateway), canDefaultStr(u.CanDefault), note)
 		}
 	case "manage-metrics":
 		if len(args) < 2 {
