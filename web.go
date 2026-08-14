@@ -316,7 +316,13 @@ func cmdWeb(st *State, args []string) {
 			http.NotFound(w, r)
 			return
 		}
-		serveStatic(w, r, "text/html; charset=utf-8", pageHTML)
+		// Stamp the RUNNING build into the page it serves. A dashboard left open across an
+		// upgrade keeps its old markup and old inline JS while /api/state feeds it the NEW
+		// version — so it displays the new version number and the old UI, which is the most
+		// misleading combination available. The page can only detect that if it knows which
+		// build it was itself loaded from. (2.24)
+		serveStatic(w, r, "text/html; charset=utf-8",
+			strings.Replace(pageHTML, "__PAGE_BUILD__", artefactVersion+" "+artefactSource(), 1))
 	})
 	mux.HandleFunc("/help", func(w http.ResponseWriter, r *http.Request) {
 		serveStatic(w, r, "text/html; charset=utf-8", helpHTML)
@@ -889,7 +895,23 @@ function render(){
    throw e
  }
 }
+const PAGE_BUILD="__PAGE_BUILD__";
+// A page open across an upgrade renders OLD markup while the API feeds it the NEW version — it
+// showed "netgov/2.23" above a 2.22 table, and nothing said so. Compare what the page was loaded
+// from against what is running now. (2.24)
+function checkStale(){
+ const running=(S.version||"")+" "+(S.source||"");
+ if(!PAGE_BUILD||PAGE_BUILD.indexOf("__")===0||running.trim()==="")return;
+ if(running.trim()===PAGE_BUILD.trim())return;
+ let b=$('#stalebar');
+ if(!b){b=document.createElement('div');b.id='stalebar';
+  b.style.cssText='position:sticky;top:0;z-index:99;padding:8px 14px;background:#3a2a00;color:#ffcf5a;border-bottom:1px solid var(--warn);font:13px/1.5 var(--mono,monospace)';
+  document.body.insertBefore(b,document.body.firstChild)}
+ b.innerHTML='&#9888; This dashboard was loaded from <b>'+PAGE_BUILD+'</b> but the service is now running <b>'+running.trim()+
+   '</b> — the controls you see are from the OLD build. <button onclick="location.reload(true)" style="margin-left:8px">Reload</button>';
+}
 function renderBody(){
+ checkStale();
  // "default route" is a SELECT, not a checkbox: the property is tri-state and "auto" (hand it
  // back to NetworkManager) is a real, reachable choice, not the absence of one. A checkbox would
  // collapse unmanaged and no into the same unticked box. (2.21)

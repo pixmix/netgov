@@ -159,6 +159,11 @@ import (
 // setting hides the state it exists to control, which is the exact invisibility 2.21 was written
 // to end, surviving inside its own fix.
 //
+// 2.24 makes a dashboard left open across an upgrade say so. The page keeps its old markup and old
+// inline JS while /api/state feeds it the new version, so it renders the NEW version number above
+// the OLD controls — which is how 2.23's new column appeared to be missing when it was being served
+// correctly all along. The page now knows which build it was loaded from and offers a reload.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -170,7 +175,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.23"
+const artefactVersion = "netgov/2.24"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
