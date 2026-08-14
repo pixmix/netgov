@@ -33,6 +33,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -338,4 +339,31 @@ func liveNeverDefault(dev string) string {
 		return ""
 	}
 	return v
+}
+
+// runningBinaryReplaced reports whether the binary this process is EXECUTING has been replaced on
+// disk since it started — i.e. the long-running service is stale relative to what is installed.
+//
+// WHY, and it is the third layer of one mistake. 2.24 made a browser page notice it had outlived
+// its serving process. It cannot notice THIS: the page stamp and /api/state both come from the
+// same process, so they agree perfectly while that process runs code nobody has shipped for an
+// hour. On 2026-08-14 I built 2.25, ran `netgov install`, and did not restart netgov-web — the
+// operator then asked why his dashboard said 2.24. It said 2.24 because it WAS 2.24; the file was
+// 2.25 and `netgov --version` happily confirmed the file. I verified the artefact and not the
+// running thing, which is the error this codebase has spent the day fixing in other people's
+// systems.
+//
+// Linux gives the answer for free: when a running executable's inode is unlinked (which is what
+// `go build -o` over a live binary does), /proc/self/exe still resolves but the kernel appends
+// " (deleted)". No version parsing, no re-exec, no ambiguity — and it is the CAUSE (this process
+// is not that file) rather than a proxy for it.
+func runningBinaryReplaced() (bool, string) {
+	p, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		return false, ""
+	}
+	if strings.HasSuffix(p, " (deleted)") {
+		return true, strings.TrimSuffix(p, " (deleted)")
+	}
+	return false, p
 }

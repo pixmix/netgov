@@ -174,6 +174,14 @@ import (
 // leg has come back. Installed and enabled by `netgov install`, NOT by arming: it is a watchdog
 // over the arbitration you already armed, and a watchdog that needs arming is off when you need it.
 //
+// 2.26 detects that the LONG-RUNNING service is executing a binary that has since been replaced.
+// 2.24 taught a browser page to notice it had outlived its serving process; it cannot notice this,
+// because the page stamp and /api/state both come from the same process and agree perfectly while
+// that process runs code nobody shipped. I built 2.25, ran `install`, did not restart netgov-web,
+// and the operator asked why his dashboard said 2.24 — it said 2.24 because it WAS 2.24. I had
+// verified the file (`netgov --version`) and not the running thing. /proc/self/exe carries
+// " (deleted)" once the inode is unlinked, which is the cause rather than a proxy for it.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -185,7 +193,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.25"
+const artefactVersion = "netgov/2.26"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

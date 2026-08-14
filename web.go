@@ -131,6 +131,11 @@ type stateView struct {
 	// MetricGovernance says whether netgov or NetworkManager actually decides the path. The
 	// version tells you the capability is installed; this tells you it governs. (2.22, c-001)
 	MetricGovernance []string `json:"metric_governance"`
+
+	// BinaryReplaced: the binary THIS PROCESS is executing has been unlinked, i.e. netgov-web is
+	// serving code older than what is installed. 2.24's page-vs-process check cannot see this —
+	// both halves come from the same process and agree perfectly while it runs stale code. (2.26)
+	BinaryReplaced bool `json:"binary_replaced"`
 }
 
 // patternRulesText renders a pattern's rules as one "selector via [fam]" line each
@@ -184,6 +189,7 @@ func buildView() stateView {
 		Version: artefactVersion, Source: artefactSource(), ClaimArmed: claimArmed()}
 	v.ClaimEnforcing, v.ClaimChecks = claimEnforcement()
 	v.MetricGovernance = governanceLines(st)
+	v.BinaryReplaced, _ = runningBinaryReplaced()
 	if cl := claimForActive(st); cl != nil {
 		v.ClaimPaths = claimPaths(cl, currentHolder(cl))
 		for _, l := range v.ClaimPaths {
@@ -954,13 +960,19 @@ const PAGE_BUILD="__PAGE_BUILD__";
 function checkStale(){
  const running=(S.version||"")+" "+(S.source||"");
  if(!PAGE_BUILD||PAGE_BUILD.indexOf("__")===0||running.trim()==="")return;
+ if(S.binary_replaced){staleBar('&#9888; netgov-web is running <b>'+running.trim()+
+   '</b> but the binary on disk has been REPLACED since it started — the service is serving old code. '+
+   '<code>systemctl --user restart netgov-web</code>');return}
  if(running.trim()===PAGE_BUILD.trim())return;
+ staleBar('&#9888; This dashboard was loaded from <b>'+PAGE_BUILD+'</b> but the service is now running <b>'+running.trim()+
+   '</b> — the controls you see are from the OLD build. <button onclick="location.reload(true)" style="margin-left:8px">Reload</button>');
+}
+function staleBar(html){
  let b=$('#stalebar');
  if(!b){b=document.createElement('div');b.id='stalebar';
   b.style.cssText='position:sticky;top:0;z-index:99;padding:8px 14px;background:#3a2a00;color:#ffcf5a;border-bottom:1px solid var(--warn);font:13px/1.5 var(--mono,monospace)';
   document.body.insertBefore(b,document.body.firstChild)}
- b.innerHTML='&#9888; This dashboard was loaded from <b>'+PAGE_BUILD+'</b> but the service is now running <b>'+running.trim()+
-   '</b> — the controls you see are from the OLD build. <button onclick="location.reload(true)" style="margin-left:8px">Reload</button>';
+ b.innerHTML=html;
 }
 function renderBody(){
  checkStale();
