@@ -302,3 +302,15 @@ func TestParkedMAC_SetsLocallyAdministeredBit(t *testing.T) {
 		t.Errorf("unparseable input must yield empty, not a bogus MAC; got %q", got)
 	}
 }
+
+// An unknown permanent MAC must FAIL CLOSED. The first implementation read it from a field this
+// box's nmcli rejects, so it came back empty — and empty fell through to "clear", which is exactly
+// the collision parking exists to prevent. A silent degradation into the original bug.
+func TestClaimMACPlan_RefusesWhenPermanentMACIsUnknown(t *testing.T) {
+	perm, cur := macMaps()
+	perm["eth0"] = "" // lookup failed
+	ops := claimMACPlan(idClaim(), "wlan0", perm, cur)
+	if len(ops) != 1 || !ops[0].Refuse {
+		t.Fatalf("an unreadable permanent MAC must refuse to plan, not guess; got %+v", ops)
+	}
+}

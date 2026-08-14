@@ -460,12 +460,24 @@ func refCIDR(holder, ref string) string {
 //     association; they simply stop wearing the identity. The standby-death bug cannot recur.
 //
 // Gated by the arm flag, per the operator: arming means "you may move the identity".
+// devPermMAC returns the adapter's FACTORY MAC, which is what the clear-vs-park decision turns on.
+// `ethtool -P` and not nmcli: this box's NetworkManager rejects GENERAL.PERM-HWADDR outright
+// ("invalid field"), and it returned empty rather than erroring in a way the caller noticed — which
+// silently fed an empty permanent MAC into the planner and degraded it back into the collision the
+// parking exists to prevent. A lookup that can fail quietly is a lookup that will.
 func devPermMAC(dev string) string {
-	out, err := run("nmcli", "-g", "GENERAL.PERM-HWADDR", "device", "show", dev)
+	out, err := run("ethtool", "-P", dev)
 	if err != nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(out))
+	if i := strings.LastIndex(out, ":"); i >= 0 {
+		f := strings.Fields(out)
+		cand := strings.ToLower(f[len(f)-1])
+		if _, err := net.ParseMAC(cand); err == nil {
+			return cand
+		}
+	}
+	return ""
 }
 
 func devCurrentMAC(dev string) string {
@@ -505,6 +517,7 @@ type macOp struct {
 	Profile string
 	Set     string // cloned-mac value to write ("" = clear, i.e. use the permanent MAC)
 	Why     string
+	Refuse  bool // this is not an operation: it is a refusal to plan, and must not be executed
 }
 
 // claimMACPlan returns the ops needed so that exactly `winner` wears IdentityMAC, LOSERS FIRST.
@@ -536,7 +549,14 @@ func claimMACPlan(cl *Claim, winner string, perm, cur map[string]string) []macOp
 		if c.Dev == winner || cur[c.Dev] != id {
 			continue
 		}
-		if perm[c.Dev] != "" && perm[c.Dev] != id {
+		if perm[c.Dev] == "" {
+			// REFUSE rather than guess. With an unknown permanent MAC we cannot tell whether
+			// clearing releases the identity or leaves the adapter wearing it, and guessing wrong
+			// puts two NICs on one MAC. Fail closed: no ops, and the caller reports why.
+			return []macOp{{Dev: c.Dev, Set: "", Why: "REFUSED: cannot read " + c.Dev +
+				"'s permanent MAC (ethtool -P), so releasing it cannot be done safely", Refuse: true}}
+		}
+		if perm[c.Dev] != id {
 			ops = append(ops, macOp{Dev: c.Dev, Set: "",
 				Why: c.Dev + " releases the identity MAC (back to its permanent " + perm[c.Dev] + ", its own reservation)"})
 			continue
@@ -953,6 +973,9 @@ func claimReconcile(cl *Claim, dry bool) []string {
 			perm[c.Dev], cur[c.Dev] = devPermMAC(c.Dev), devCurrentMAC(c.Dev)
 		}
 		ops := claimMACPlan(cl, v.Winner, perm, cur)
+		if len(ops) == 1 && ops[0].Refuse {
+			return append(log, "ABORT: "+ops[0].Why+" — nothing changed")
+		}
 		if len(ops) == 0 {
 			log = append(log, "OK: "+v.Winner+" already wears the identity MAC "+cl.IdentityMAC+
 				"; every other claimant is on its own address")
@@ -1252,20 +1275,14 @@ func claimSet(st *State, sp string, args []string) {
 		os.Exit(1)
 	}
 
-	cl := &Claim{Address: addr}
-	seen := map[string]bool{}
-	for _, s := range specs {
-		c, err := parseClaimant(s)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if seen[c.Dev] {
-			fmt.Fprintf(os.Stderr, "claimant %s listed twice — one entry per adapter\n", c.Dev)
-			os.Exit(1)
-		}
-		seen[c.Dev] = true
-		cl.Claimants = append(cl.Claimants, c)
+	// Reuse parseClaimForm rather than re-walking the specs here. This function used to have its
+	// own copy of the claimant loop, and when 2.27 added `identity=<mac>` to the grammar the CLI
+	// silently ignored it while the web form accepted it — two parsers for one grammar is one
+	// parser too many.
+	cl, err := parseClaimForm(strings.Join(append([]string{addr}, specs...), " "))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 	// A single claimant is legal but almost never intended: arbitration between one candidate is
 	// a no-op, so say so rather than let it look configured.
