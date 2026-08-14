@@ -311,6 +311,226 @@ func claimantEligible(c Claimant) (bool, string) {
 	return false, "associated to " + cur + " (not a listed SSID)"
 }
 
+// ---- route disposition: HOLDING the address is not BEING the path ----
+
+// routeGet asks the KERNEL which device and source address it would use to reach target, exactly
+// as a socket would. `from` optionally pins the source, modelling a socket bound to an address.
+//
+// It parses `ip route get` rather than `ip route show` on purpose: `show` is the input to the
+// decision and would have to be re-derived here (metrics, rule priorities, per-table lookups,
+// which of two on-link routes for the same prefix wins); `get` IS the decision, already made, by
+// the code that will make it for real. Re-implementing the kernel's selection in order to report
+// on it is how you get a report that disagrees with the system it describes.
+//
+// Returns ("", "") when the lookup fails — an unroutable target is not a finding to shout about.
+func routeGet(fam, target, from string) (dev, src string) {
+	argv := []string{"ip", "-" + fam, "route", "get", target}
+	if from != "" {
+		argv = append(argv, "from", from)
+	}
+	out, err := run(argv...)
+	if err != nil {
+		return "", ""
+	}
+	return parseRouteGet(out, from)
+}
+
+func parseRouteGet(out, from string) (dev, src string) {
+	f := strings.Fields(out)
+	for i := 0; i+1 < len(f); i++ {
+		switch f[i] {
+		case "dev":
+			if dev == "" {
+				dev = f[i+1]
+			}
+		case "src":
+			if src == "" {
+				src = f[i+1]
+			}
+		}
+	}
+	// `ip route get X from Y` echoes the pin instead of printing `src`, which is the same answer
+	// phrased differently. Say it, rather than reporting an empty source for a bound socket.
+	if src == "" && from != "" {
+		src = from
+	}
+	return dev, src
+}
+
+// devSubnetAddrs returns the addresses dev carries that sit in the SAME subnet as ref, excluding
+// ref itself. The prefix comes from whichever adapter carries ref, so there is nothing to
+// configure and nothing to guess.
+//
+// This is the mechanism behind a HOLDS-is-not-PATH split, and it is worth naming separately from
+// the symptom. Measured on .153, 2026-08-14, with the router's own config as the evidence:
+//
+//	dhcp.r98bd80ec68cd.ip  = '192.168.222.153'
+//	dhcp.r98bd80ec68cd.mac = '98:bd:80:ec:68:cd' '48:21:0b:6e:06:85'   <- BOTH NUC adapters
+//
+// That dual-MAC reservation is the dnsmasq case this whole file exists for. Arbitration works:
+// the standby does not get .153. But dnsmasq, refused from issuing the reserved address twice,
+// hands the standby a POOL address instead of nothing — and NetworkManager's default wifi metric
+// (600) beats the wired profile's explicit 1000, so the standby's consolation address becomes the
+// source and the standby becomes the path. Three leases in one hour here (.236 -> .238 -> .239),
+// each reassociation taking a fresh one, so the box's effective identity churns while the identity
+// the arbiter guards stays rock solid.
+//
+// Invariant 1 says a standby must neither hold nor request THE LEASE. This is the case it does not
+// cover: the standby is on the segment holding a DIFFERENT address, which is the same
+// standby-on-segment condition this project's own 2026-08-13 design correction named after
+// ms-rosy .186 — and, with arp_ignore=0, the standby still answers ARP for the guarded address
+// too. Reported, not acted on: taking a second address away is a policy decision about the
+// operator's live path, not something an arbiter should infer.
+func devSubnetAddrs(dev, ref string) []string {
+	_, netw, err := net.ParseCIDR(refCIDR(dev, ref))
+	if err != nil {
+		return nil
+	}
+	out, err := run("ip", "-4", "-o", "addr", "show", "dev", dev)
+	if err != nil {
+		return nil
+	}
+	var got []string
+	for _, f := range strings.Fields(out) {
+		ip, _, err := net.ParseCIDR(f)
+		if err != nil || ip.String() == ref || !netw.Contains(ip) {
+			continue
+		}
+		got = append(got, ip.String())
+	}
+	return got
+}
+
+// refCIDR finds ref's prefix by asking the adapter that carries it. Falls back to a /24, which is
+// the LAN case this runs in; a wrong guess here can only under-report.
+func refCIDR(holder, ref string) string {
+	if out, err := run("ip", "-4", "-o", "addr", "show", "dev", holder); err == nil {
+		for _, f := range strings.Fields(out) {
+			if strings.HasPrefix(f, ref+"/") {
+				return f
+			}
+		}
+	}
+	return ref + "/24"
+}
+
+// currentHolder returns the claimant device that actually carries the address right now, or "".
+// Deliberately the OBSERVED holder rather than claimEvaluate's winner: the point of the path
+// report is to describe the box as it stands, and the winner is what the arbiter would move to.
+func currentHolder(cl *Claim) string {
+	for _, c := range cl.Claimants {
+		if devHoldsAddr(c.Dev, cl.Address) {
+			return c.Dev
+		}
+	}
+	return ""
+}
+
+// claimPaths reports which adapter this host actually TALKS on, next to the one that HOLDS the
+// claimed address.
+//
+// WHY THIS EXISTS. On 2026-08-14 c-019 measured this box and found `claim status` reporting
+// `OK: enp114s0 already holds 192.168.222.153 exclusively`. That verdict was true — the address
+// was held, exclusively, by an eligible adapter probing 0% loss. And every packet the host
+// originated left over a *second* adapter, which had taken its own DHCP address on the same
+// subnet at a lower route metric. The arbiter's guarantee (exactly one adapter holds the address)
+// and the property a reader takes from it (the host talks on that adapter) had come apart
+// cleanly, on an armed box, with every check green.
+//
+// It is the mechanism this project already named on ms-rosy .186 — THE PATH IS CHOSEN BY ROUTE
+// METRIC, NOT BY WHO HOLDS THE ADDRESS. There it explained a fault; here it is a standing
+// condition that the tool's own output could not see. A verdict that is true and misread is a
+// reporting defect, and the fix for a reporting defect is to report the other half.
+//
+// Deliberately READ-ONLY, and deliberately NOT part of claimReconcile:
+//
+//   - The arbiter's remit is the ADDRESS. A route metric is the host's own policy and there are
+//     good reasons for the split — on this very box the wired profile is `ipv4.never-default` on
+//     purpose, so that cabling to the router cannot capture the session's internet lifeline. An
+//     arbiter that "fixed" that would be overriding a deliberate guard it knows nothing about.
+//   - It must not run on the dispatcher hot path. Arbitration already costs a bounded probe per
+//     claimant on a carrier event; adding lookups that change no decision would be pure latency.
+//
+// So: report it, do not arbitrate it. The operator decides whether the split is intended.
+func claimPaths(cl *Claim, holder string) []string {
+	if holder == "" {
+		return nil
+	}
+	gw := dhcpRouter(holder)
+	if gw == "" {
+		gw = defaultGateway()
+	}
+
+	obs := pathObs{Gateway: gw}
+	if gw != "" {
+		obs.OnDev, obs.OnSrc = routeGet("4", gw, "")
+		obs.BoundDev, _ = routeGet("4", gw, cl.Address)
+	}
+	obs.OffDev, obs.OffSrc = routeGet("4", "1.1.1.1", "")
+	for _, c := range cl.Claimants {
+		if c.Dev == holder {
+			continue
+		}
+		for _, a := range devSubnetAddrs(c.Dev, cl.Address) {
+			obs.Extra = append(obs.Extra, c.Dev+" "+a)
+		}
+	}
+	return pathLines(cl.Address, holder, obs)
+}
+
+// pathObs is what the kernel answered. Separated from the verdict below so the verdict is a pure
+// function of measurements — otherwise the only way to check that the split is reported is to
+// arrange a two-adapter host, which is exactly the condition nobody has when the code is written.
+type pathObs struct {
+	Gateway        string
+	OnDev, OnSrc   string   // unbound, to the on-link gateway
+	OffDev, OffSrc string   // unbound, off-link
+	BoundDev       string   // bound to the claimed address, on-link
+	Extra          []string // "dev addr": a NON-holder holding another address on the guarded subnet
+}
+
+// pathLines turns the observations into the report. Pure: no I/O, so a test can assert the effect.
+func pathLines(addr, holder string, o pathObs) []string {
+	var out []string
+	if o.OnDev != "" {
+		out = append(out, fmt.Sprintf(" path: %-24s -> %-14s src %s", "on-link ("+o.Gateway+")", o.OnDev, orDash(o.OnSrc)))
+	}
+	if o.OffDev != "" {
+		out = append(out, fmt.Sprintf(" path: %-24s -> %-14s src %s", "off-link (1.1.1.1)", o.OffDev, orDash(o.OffSrc)))
+	}
+	// A standby holding its own address on the guarded subnet is reportable on its own account,
+	// whichever way the routes currently fall: it is on the segment, it competes for the reply
+	// path, and under arp_ignore=0 it answers ARP for the guarded address too.
+	for _, e := range o.Extra {
+		out = append(out, " ⚠ standby on the guarded subnet: "+e+
+			" — a second address on this subnet, so the standby is still on the segment")
+	}
+	if o.OnDev == "" {
+		return out
+	}
+	if o.OnDev == holder && o.OnSrc == addr {
+		return append(out, " path: holder is the path — traffic on this subnet leaves via "+holder+" as "+addr)
+	}
+
+	// The finding. Name the consequence a peer would see, not the abstraction: "peers see .238"
+	// is checkable from the other end; "route disposition differs" is not.
+	msg := " ⚠ HOLDS is not PATH: " + holder + " holds " + addr +
+		", but traffic this host originates on that subnet leaves via " + o.OnDev
+	if o.OnSrc != "" && o.OnSrc != addr {
+		msg += " as " + o.OnSrc + " — peers see " + o.OnSrc + ", not " + addr
+	}
+	out = append(out, msg)
+	out = append(out, "   the path is chosen by ROUTE METRIC, not by who holds the address; arbitration"+
+		" does not change it and is not reporting a fault here (`ip route get "+o.Gateway+"`)")
+
+	// A socket BOUND to the claimed address is the case that still works, and saying so keeps the
+	// warning from reading as "the address is unusable" when it is not.
+	if o.BoundDev != "" {
+		out = append(out, "   bound to "+addr+": on-link -> "+o.BoundDev)
+	}
+	return out
+}
+
 // devHoldsAddr reports whether dev currently carries addr.
 func devHoldsAddr(dev, addr string) bool {
 	out, err := run("ip", "-4", "-o", "addr", "show", "dev", dev)
@@ -910,6 +1130,11 @@ func cmdClaim(st *State, args []string) {
 	case "status", "eval":
 		for _, l := range claimReconcile(cl, true) {
 			fmt.Println(" " + l)
+		}
+		// The holder is what the arbiter guarantees; the path is what the reader assumes it
+		// guarantees. Print both, so "OK" cannot be read as the second one. (2.20)
+		for _, l := range claimPaths(cl, currentHolder(cl)) {
+			fmt.Println(l)
 		}
 	case "apply":
 		if !claimArmed() {

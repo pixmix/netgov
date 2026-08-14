@@ -117,13 +117,38 @@ import (
 // binary. c-001 followed it exactly and reported a dead arbiter as live. The proxy was in my
 // documentation, so the doc is where it had to be fixed.
 //
+// 2.16 fixes the two faults that stranded .186: a no-incumbent case that failed silently, and a
+// dispatcher loop that re-triggered itself indefinitely (the cooldown gate).
+//
+// 2.17 stops `--state` writing production state from a hand-run check, and stops DUPLICATE ARP
+// replies counting as distinct successes — a proxy medium answering twice read as perfect health.
+//
+// 2.18 reports the ENFORCEMENT CONJUNCTION rather than the arm flag (c-016): armed AND hook
+// present AND hook executable AND probe capable. Any one missing is an armed box arbitrating
+// nothing, and all three of those hid behind a single boolean on the night of 2026-08-13/14.
+//
+// 2.19 documents what a probe PASS means and what it does not — the loss fraction certifies the
+// leg at the moment it was measured, not the leg.
+//
+// 2.20 reports the ROUTE DISPOSITION beside the holder. c-019 measured this box and found
+// `claim status` saying `OK: enp114s0 already holds .153 exclusively` — true, and every packet
+// the host originated leaving over a second adapter holding a second address on the same subnet
+// at a lower metric. The arbiter's guarantee and the property a reader takes from it had come
+// apart with every check green. Nothing was wrong with the arbiter; the defect was that its own
+// output could not see the condition. See claimPaths.
+//
+// (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
+// in its own commit, as the rule below requires, but none extended this block. A version history
+// that stops four releases short is the same class of defect as a stale version — the record of
+// what shipped, disagreeing with what shipped.)
+//
 // BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
 // that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
 // binaries that were not the same code, and the version check the mesh policy exists to enable
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.19"
+const artefactVersion = "netgov/2.20"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

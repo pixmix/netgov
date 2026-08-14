@@ -109,6 +109,14 @@ type stateView struct {
 	// the same lie the CLI used to tell, one surface along.
 	ClaimEnforcing bool     `json:"claim_enforcing"`
 	ClaimChecks    []string `json:"claim_checks"`
+
+	// ClaimPaths is the route disposition next to the holder: which adapter the host actually
+	// TALKS on. Enforcing tells you arbitration works; this tells you what that bought. They can
+	// disagree — on .153 on 2026-08-14 the arbiter was enforcing correctly and every packet the
+	// box originated left on the other adapter. ClaimPathSplit is that condition as one flag, so
+	// the badge does not have to grep prose. (2.20)
+	ClaimPaths     []string `json:"claim_paths"`
+	ClaimPathSplit bool     `json:"claim_path_split"`
 }
 
 // patternRulesText renders a pattern's rules as one "selector via [fam]" line each
@@ -161,6 +169,14 @@ func buildView() stateView {
 		Armed: st.Armed, Active: st.ActivePattern,
 		Version: artefactVersion, Source: artefactSource(), ClaimArmed: claimArmed()}
 	v.ClaimEnforcing, v.ClaimChecks = claimEnforcement()
+	if cl := claimForActive(st); cl != nil {
+		v.ClaimPaths = claimPaths(cl, currentHolder(cl))
+		for _, l := range v.ClaimPaths {
+			if strings.Contains(l, "HOLDS is not PATH") {
+				v.ClaimPathSplit = true
+			}
+		}
+	}
 	for _, p := range patternsByPrio(st) {
 		v4, v6 := normDefault(p.V4), normDefault(p.V6)
 		if v4 == "" {
@@ -867,8 +883,13 @@ function renderBody(){
     : (S.claim_enforcing ? '<span class="pill up">ARMED · enforcing</span>'
                          : '<span class="pill" style="color:var(--warn);border-color:var(--warn)">ARMED · NOT ENFORCING</span>');
   if(S.claim_armed&&!S.claim_enforcing){$('#clbadge').title=(S.claim_checks||[]).join(' | ')}
+  // ENFORCING is about the arbiter; the split is about the host. Both green and still every
+  // packet leaving on the other adapter is a real state (.153, 2026-08-14), so it gets its own
+  // badge rather than a footnote — the whole failure was a true verdict being read as more.
+  if(S.claim_path_split){$('#clbadge').innerHTML += ' <span class="pill" style="color:var(--warn);border-color:var(--warn)" title="'+(S.claim_paths||[]).join(' | ').replace(/"/g,'&quot;')+'">HOLDS ≠ PATH</span>'}
   $('#clnote').textContent = cl
     ? 'active pattern '+ap.name+' can move '+cl.address+' between '+(cl.claimants||[]).map(c=>c.dev).join(' / ')
+      +((S.claim_paths||[]).length?' — '+S.claim_paths.filter(l=>l.indexOf('path:')>=0).map(l=>l.trim()).join('; '):'')
     : 'no claim on the active pattern — arming changes nothing until one is declared';}
  $('#prq').innerHTML=(S.uplinks||[]).map(u=>'<option>'+u.name+'</option>').join('');
  $('#pssidif').innerHTML=(S.uplinks||[]).map(u=>'<option'+(u.name==='WiFi0'?' selected':'')+'>'+u.name+'</option>').join('');
