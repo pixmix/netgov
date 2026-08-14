@@ -41,6 +41,9 @@ type uplinkView struct {
 	Table int     `json:"table"`
 	V4    famView `json:"v4"`
 	V6    famView `json:"v6"`
+	// CanDefault is tri-state and must survive as null in JSON — omitempty would erase the
+	// difference between "unmanaged" and "may not carry the default", which are opposite states.
+	CanDefault *bool `json:"can_default"`
 }
 type ruleView struct {
 	Key  string   `json:"key"`  // domain or "from:..."
@@ -196,7 +199,7 @@ func buildView() stateView {
 		if servingDev(st, u.Dev) {
 			continue // shadowed by an AP
 		}
-		v.Uplinks = append(v.Uplinks, uplinkView{Name: u.Name, Dev: u.Dev, Table: u.Table, V4: famOf(u, "4"), V6: famOf(u, "6")})
+		v.Uplinks = append(v.Uplinks, uplinkView{Name: u.Name, Dev: u.Dev, Table: u.Table, V4: famOf(u, "4"), V6: famOf(u, "6"), CanDefault: u.CanDefault})
 	}
 	for _, a := range st.APs {
 		v.APs = append(v.APs, apView{Name: a.Name, Dev: a.Dev, SSID: a.SSID, Band: a.Band, On: a.On, Active: apActive(a.Dev) == "up"})
@@ -331,6 +334,21 @@ func cmdWeb(st *State, args []string) {
 				}
 			} else {
 				s.Uplinks = append(s.Uplinks, Uplink{Name: name, Dev: dev, Table: t, Gateway: gw})
+			}
+		case "default-route":
+			// Tri-state, and "auto" must stay reachable from the UI: it is the only way to hand a
+			// property back to NetworkManager once netgov has been asked to hold it. (2.21)
+			if u := upByName(s, r.FormValue("name")); u != nil {
+				switch r.FormValue("value") {
+				case "yes":
+					t := true
+					u.CanDefault = &t
+				case "no":
+					f := false
+					u.CanDefault = &f
+				default:
+					u.CanDefault = nil
+				}
 			}
 		case "del":
 			name := r.FormValue("name")
@@ -780,7 +798,7 @@ small{color:var(--mut)}
 <a href="/help" target="_blank" title="open the help page" style="color:var(--mut);border:1px solid var(--ln);border-radius:4px;padding:3px 10px;text-decoration:none;margin-left:6px">? help</a></header>
 <main>
 <section><h2>Uplinks</h2><table id="ut"><thead><tr><th>name</th><th>iface</th>
-<th>IPv4</th><th>IPv6</th><th>tbl</th><th></th></tr></thead><tbody></tbody></table>
+<th>IPv4</th><th>IPv6</th><th>tbl</th><th title="may this uplink carry the DEFAULT ROUTE? netgov owns ipv4.never-default when this is yes/no; auto leaves it to NetworkManager">default route</th><th></th></tr></thead><tbody></tbody></table>
 <div class="row"><span class="mut">define:</span><input id="un" placeholder="name" size="8">
 <input id="ud" placeholder="iface" size="14"><input id="ug" placeholder="gateway (optional)" size="15">
 <button onclick="defUp()">+ uplink</button></div></section>
@@ -860,8 +878,15 @@ function render(){
  }
 }
 function renderBody(){
- $('#ut tbody').innerHTML=(S.uplinks||[]).map(u=>'<tr><td class="acc">'+u.name+'</td><td>'+u.dev+'</td><td>'+fcell(u.v4)+
-  '</td><td>'+fcell(u.v6)+'</td><td class="mut">'+u.table+'</td><td><button title="restore link to NM profile" onclick="reapply(\''+u.dev+'\')">↺</button> <button onclick="delUp(\''+u.name+'\')">×</button></td></tr>').join('')||'<tr><td colspan=6 class=mut>none — run “netgov init”</td></tr>';
+ // "default route" is a SELECT, not a checkbox: the property is tri-state and "auto" (hand it
+ // back to NetworkManager) is a real, reachable choice, not the absence of one. A checkbox would
+ // collapse unmanaged and no into the same unticked box. (2.21)
+ $('#ut tbody').innerHTML=(S.uplinks||[]).map(u=>{
+   const cd=(u.can_default===true?'yes':(u.can_default===false?'no':'auto'));
+   const sel='<select title="may this uplink carry the DEFAULT ROUTE? netgov owns ipv4.never-default; auto = leave it to NetworkManager. Takes effect on apply; netgov reset restores the original." onchange="setDefRoute(\''+u.name+'\',this.value)">'
+     +['yes','no','auto'].map(v=>'<option value="'+v+'"'+(v===cd?' selected':'')+'>'+(v==='auto'?'auto':v)+'</option>').join('')+'</select>';
+   return '<tr><td class="acc">'+u.name+'</td><td>'+u.dev+'</td><td>'+fcell(u.v4)+
+  '</td><td>'+fcell(u.v6)+'</td><td class="mut">'+u.table+'</td><td>'+sel+'</td><td><button title="restore link to NM profile" onclick="reapply(\''+u.dev+'\')">↺</button> <button onclick="delUp(\''+u.name+'\')">×</button></td></tr>'}).join('')||'<tr><td colspan=7 class=mut>none — run “netgov init”</td></tr>';
  const dr=(S.rules||[]).filter(r=>r.kind==='dest');
  $('#rt tbody').innerHTML=(dr.length?dr:[]).map(r=>'<tr><td>'+r.sel+'</td><td class="acc">'+r.via+'</td><td class="mut">['+r.fam+']</td><td class="mut">'+((r.ips||[]).join(' ')||'unresolved')+'</td><td><button onclick="delRule({domain:\''+r.sel+'\'})">×</button></td></tr>').join('')||'<tr><td class=mut colspan=5>none</td></tr>';
  const sr=(S.rules||[]).filter(r=>r.kind==='src');
@@ -906,6 +931,10 @@ function log(m){$('#log').textContent=m}
 async function post(u,d){return (await fetch(u,{method:'POST',body:new URLSearchParams(d)})).json()}
 async function defUp(){S=await post('/api/uplink',{action:'define',name:$('#un').value,dev:$('#ud').value,gw:$('#ug').value});render();$('#un').value='';$('#ud').value='';$('#ug').value=''}
 async function delUp(n){if(confirm('remove uplink '+n+'?')){S=await post('/api/uplink',{action:'del',name:n});render()}}
+// Saves the PREFERENCE only. Deliberately does not apply: this writes an NM profile property, and
+// the standing rule for this box is that anything which can flip routing is inspectable first.
+async function setDefRoute(n,v){S=await post('/api/uplink',{action:'default-route',name:n,value:v});render();
+ alert('Saved: '+n+' default-route='+v+'\n\nNot applied yet. Run "netgov plan" to see exactly what would change, then Apply.\n\nnetgov saves the profile original value the first time it takes it over, and "netgov reset" restores it.')}
 async function addDest(){S=await post('/api/rule',{action:'add',domain:$('#rd').value,via:$('#rv').value,fam:$('#rf').value});render();$('#rd').value=''}
 async function addSrc(){let f=$('#sfrom').value;if(f===''){f=prompt('source CIDR (e.g. 172.20.0.0/16) or interface name');if(!f)return}
  S=await post('/api/rule',{action:'add',from:f,via:$('#sv').value,fam:$('#sf').value});render()}

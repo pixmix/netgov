@@ -137,6 +137,14 @@ import (
 // apart with every check green. Nothing was wrong with the arbiter; the defect was that its own
 // output could not see the condition. See claimPaths.
 //
+// 2.21 takes ownership of the two NetworkManager profile properties that decide which adapter
+// carries traffic — `ipv4.never-default` (per-uplink toggle, tri-state, nil = unmanaged) and
+// `ipv4.route-metric` (derived from claim priority). Operator ruling: "if someone still needs to
+// manually tamper something else, then netgov is not doing all the job it should." This gives up
+// netgov's absolute never-writes-NM promise, so `reset` becomes save-and-restore rather than a
+// no-op: the pre-netgov value of every property is recorded ONCE and put back on reset. See
+// nmprops.go for why once is the load-bearing word.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -148,7 +156,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.20"
+const artefactVersion = "netgov/2.21"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -203,6 +211,14 @@ type Uplink struct {
 	Table    int    `json:"table"`
 	Gateway  string `json:"gw,omitempty"`  // explicit v4 gw override (never-default LAN uplink)
 	Gateway6 string `json:"gw6,omitempty"` // explicit v6 gw override
+
+	// CanDefault is TRI-STATE and nil means UNMANAGED, not false. It maps to NM's
+	// `ipv4.never-default` (inverted): whether this uplink may carry the default route at all.
+	// Before 2.21 the property was invisible to netgov, which would accept `default set --v4
+	// cable`, report it applied, and be silently overruled by a `never-default` profile.
+	// nil-means-unmanaged is deliberate: netgov must not adopt a property nobody asked it to
+	// hold, because `reset` would then "restore" a value netgov invented. See nmprops.go.
+	CanDefault *bool `json:"can_default,omitempty"`
 }
 
 // Rule steers traffic to an uplink (Via) or drops it (Via=="block"). Exactly one of
@@ -261,6 +277,17 @@ type State struct {
 	Patterns      []Pattern `json:"patterns,omitempty"`
 	Armed         string    `json:"armed,omitempty"`          // "" | "armed" | "dry"
 	ActivePattern string    `json:"active_pattern,omitempty"` // last selected/activated pattern
+
+	// ManageMetrics turns on deriving `ipv4.route-metric` from claim priority (2.21). nil/false =
+	// off, and that is the correct default on upgrade: the apply path runs from the NM dispatcher
+	// on carrier events, so enabling it by default would hand netgov a host property at the next
+	// link flap on every box that upgraded, without anyone asking. `netgov uplink manage-metrics on`.
+	ManageMetrics *bool `json:"manage_metrics,omitempty"`
+
+	// NMSaved holds the pre-netgov value of every NetworkManager property netgov has taken over,
+	// so `reset` is still a complete restore now that netgov writes NM profiles (2.21). Written
+	// exactly once per property — see nmprops.go for why that is the load-bearing part.
+	NMSaved []NMSaved `json:"nm_saved,omitempty"`
 
 	LegacyDefault string `json:"default,omitempty"` // migrated from v1
 }
@@ -808,6 +835,19 @@ func applyRoot(st *State) {
 			fmt.Fprintf(os.Stderr, "  ! %s -> %v %s\n", strings.Join(c, " "), err, out)
 		}
 	}
+	// NM profile properties netgov owns (2.21): never-default + route-metric from claim priority.
+	// AFTER the rule build, deliberately — the rules are netgov's own reversible band and land
+	// whatever happens, while this touches the host's profiles and can prompt a reapply.
+	if n, notes := applyUplinkRouting(st); n > 0 || len(notes) > 0 {
+		for _, l := range notes {
+			fmt.Println("  " + l)
+		}
+		if n > 0 {
+			fmt.Printf("netgov: %d NM propert%s taken over (originals saved; `netgov reset` restores them)\n",
+				n, map[bool]string{true: "y", false: "ies"}[n == 1])
+			saveStateKeepOwner(st, statePath())
+		}
+	}
 	fmt.Printf("netgov: applied (%d cmds, %d errors)\n", len(build), errs)
 }
 
@@ -820,7 +860,17 @@ func resetRoot(st *State) {
 	for _, c := range clean {
 		_, _ = run(c...)
 	}
-	fmt.Printf("netgov: reset — %d cleanup cmds; NetworkManager baseline restored\n", len(clean))
+	// Restore every NM property netgov took over (2.21). Without this, "NetworkManager baseline
+	// restored" below would be a claim the tool no longer earns.
+	nm := restoreNMProps(st)
+	for _, l := range nm {
+		fmt.Println("  " + l)
+	}
+	if len(nm) > 0 {
+		saveStateKeepOwner(st, statePath())
+	}
+	fmt.Printf("netgov: reset — %d cleanup cmds, %d NM propert%s restored; NetworkManager baseline restored\n",
+		len(clean), len(nm), map[bool]string{true: "y", false: "ies"}[len(nm) == 1])
 }
 
 // privileged re-exec via sudo -A (zenity)
@@ -1367,6 +1417,24 @@ func main() {
 		for _, c := range build {
 			fmt.Println("  " + strings.Join(c, " "))
 		}
+		// The NM half is shown SEPARATELY and last, because it is the half that leaves the
+		// reversible band. The operator's standing rule for this box is that anything which can
+		// flip routing must be inspectable in safe mode first; this is that inspection.
+		nmc, reapply, notes := uplinkRoutingPlan(st)
+		fmt.Printf("# NM profile properties netgov would take over — %d change(s)\n", len(nmc))
+		for _, l := range notes {
+			fmt.Println("  " + l)
+		}
+		for _, c := range nmc {
+			fmt.Println("  " + strings.Join(c, " "))
+		}
+		if len(reapply) > 0 {
+			fmt.Println("  nmcli device reapply " + strings.Join(reapply, " ") +
+				"   (in place — never a down/up, which would drop the link being tuned)")
+		}
+		if len(nmc) > 0 {
+			fmt.Println("  originals would be saved to state; `netgov reset` restores them")
+		}
 	case "link":
 		cmdLink(rest)
 	case "web":
@@ -1417,8 +1485,56 @@ func cmdUplink(st *State, args []string) {
 	switch args[0] {
 	case "list":
 		for _, u := range st.Uplinks {
-			fmt.Printf("  %-8s dev=%-16s table=%d gw=%s\n", u.Name, u.Dev, u.Table, dash(u.Gateway))
+			fmt.Printf("  %-8s dev=%-16s table=%d gw=%-15s default-route=%s\n",
+				u.Name, u.Dev, u.Table, dash(u.Gateway), canDefaultStr(u.CanDefault))
 		}
+	case "manage-metrics":
+		if len(args) < 2 {
+			fmt.Printf("  manage-metrics: %s\n", map[bool]string{true: "ON — route metrics follow claim priority", false: "off — NetworkManager decides"}[st.ManageMetrics != nil && *st.ManageMetrics])
+			fmt.Println("  usage: netgov uplink manage-metrics on|off")
+			return
+		}
+		on := args[1] == "on" || args[1] == "yes" || args[1] == "true"
+		st.ManageMetrics = &on
+		must(saveState(st, statePath()))
+		if on {
+			fmt.Println("manage-metrics ON — netgov will set ipv4.route-metric from claim priority.")
+			fmt.Println("Nothing has changed yet: run `netgov plan` to see exactly what would be written,")
+			fmt.Println("then `netgov apply`. Originals are saved on first take-over; `netgov reset` restores them.")
+			return
+		}
+		fmt.Println("manage-metrics off — netgov will stop setting metrics.")
+		fmt.Println("Already-taken-over properties are NOT reverted by this switch; `netgov reset` does that.")
+	case "default-route":
+		// netgov uplink default-route <name> yes|no|auto
+		if len(args) < 3 {
+			fmt.Println("usage: netgov uplink default-route <name> yes|no|auto")
+			fmt.Println("  yes  = this uplink MAY carry the default route (ipv4.never-default no)")
+			fmt.Println("  no   = it may NOT (ipv4.never-default yes) — e.g. a cable to an untrusted router")
+			fmt.Println("  auto = netgov does not manage it; whatever NM has, stays")
+			os.Exit(2)
+		}
+		u := upByName(st, args[1])
+		if u == nil {
+			fmt.Fprintln(os.Stderr, "no such uplink:", args[1])
+			os.Exit(1)
+		}
+		switch strings.ToLower(args[2]) {
+		case "yes", "on", "true":
+			t := true
+			u.CanDefault = &t
+		case "no", "off", "false":
+			f := false
+			u.CanDefault = &f
+		case "auto", "unmanaged", "":
+			u.CanDefault = nil
+		default:
+			fmt.Fprintln(os.Stderr, "expected yes|no|auto, got:", args[2])
+			os.Exit(1)
+		}
+		must(saveState(st, statePath()))
+		fmt.Printf("uplink %s default-route=%s — run `netgov plan` to see the change, `netgov apply` to make it\n",
+			u.Name, canDefaultStr(u.CanDefault))
 	case "define":
 		if len(args) < 2 {
 			fmt.Println("usage: netgov uplink define <name> --dev <iface> [--gw <ip>] [--table N]")
