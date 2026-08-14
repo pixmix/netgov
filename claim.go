@@ -414,6 +414,52 @@ func refCIDR(holder, ref string) string {
 	return ref + "/24"
 }
 
+// claimNeedsAttention is the LIVENESS pre-check: cheap, probe-free, and the answer to the gap
+// c-001 measured on 2026-08-14 (n-243 §3).
+//
+// THE GAP. Arbitration is EDGE-TRIGGERED — it runs from the NM dispatcher on carrier events and
+// nowhere else. A failed claim sets a 300s cooldown to stop a hot loop, which it does. But if the
+// network then goes QUIET, no further edge arrives, the cooldown lapses with nobody watching, and
+// the guarded address stays held by NOBODY indefinitely. Measured: 19 minutes on .153, ended only
+// by a human running `nmcli connection up`. The cooldown correctly prevents a hot loop and
+// accidentally guarantees a cold one never resolves — and THE QUIETER THE NETWORK, THE LONGER IT
+// STAYS STRANDED, which is the opposite of what anyone assumes, and why it survived review.
+//
+// WHY A PRE-CHECK RATHER THAN JUST RE-RUNNING ARBITRATION ON A TIMER. Eligibility costs a 10-probe
+// arping per claimant by construction (~10s wall). Running that every minute on every box would
+// burn the segment for nothing, on the overwhelmingly common case where the address is exactly
+// where it should be. This asks two questions that need no packets:
+//
+//  1. Does ANYBODY hold the address? Nobody ⇒ stranded ⇒ act. This is the measured failure.
+//  2. Does a HIGHER-PRIORITY claimant have carrier while a lower-priority one holds it? That is
+//     the preferred leg having come back after being released — the come-back case. Carrier alone
+//     does not make it eligible (carrier is not health, invariant), so this only decides whether
+//     the expensive test is WORTH RUNNING; claimEvaluate still decides the outcome.
+//
+// Everything else is a no-op, so the timer is nearly free and the probe still gates every move.
+func claimNeedsAttention(cl *Claim) (bool, string) {
+	holder := currentHolder(cl)
+	if holder == "" {
+		return true, "STRANDED: " + cl.Address + " is held by NOBODY"
+	}
+	held := 0
+	for _, c := range cl.Claimants {
+		if c.Dev == holder {
+			held = c.Priority
+		}
+	}
+	for _, c := range cl.Claimants {
+		if c.Dev == holder || c.Priority <= held {
+			continue
+		}
+		if devCarrier(c.Dev) {
+			return true, "RETURNED: " + c.Dev + " (priority " + strconv.Itoa(c.Priority) +
+				") has carrier and outranks the holder " + holder + " (priority " + strconv.Itoa(held) + ")"
+		}
+	}
+	return false, "holder " + holder + " is present and no higher-priority claimant has carrier"
+}
+
 // currentHolder returns the claimant device that actually carries the address right now, or "".
 // Deliberately the OBSERVED holder rather than claimEvaluate's winner: the point of the path
 // report is to describe the box as it stands, and the winner is what the arbiter would move to.
@@ -1096,6 +1142,26 @@ func cmdClaim(st *State, args []string) {
 	case "clear":
 		claimClear(st, statePathFor(args), stripFlags(args[1:], "--state"))
 		return
+	case "tick":
+		// The timer entry point (netgov-claim-watch.timer). Deliberately silent and cheap when
+		// there is nothing to do, so it can run every minute without filling the journal or the
+		// segment. Refuses to act when disarmed, exactly like `apply`.
+		if cl == nil {
+			return
+		}
+		need, why := claimNeedsAttention(cl)
+		if !need {
+			return
+		}
+		if !claimArmed() {
+			fmt.Println("claim tick: " + why + " — NOT ARMED, taking no action")
+			return
+		}
+		fmt.Println("claim tick: " + why + " — re-attempting")
+		for _, l := range claimReconcile(cl, false) {
+			fmt.Println(" " + l)
+		}
+		return
 	case "arm":
 		if err := runPriv("touch", claimArmedFlag); err != nil {
 			fmt.Fprintln(os.Stderr, "arm failed:", err)
@@ -1141,6 +1207,9 @@ func cmdClaim(st *State, args []string) {
 		for _, l := range governanceLines(st) {
 			fmt.Println(" " + l)
 		}
+		// Liveness: arbitration on carrier edges alone leaves a stranded address stranded when the
+		// network goes quiet. Say whether the watchdog that covers that is actually running. (2.25)
+		fmt.Println(" " + claimWatchLine())
 	case "apply":
 		if !claimArmed() {
 			fmt.Println(" refusing to apply: not armed (netgov claim arm) — showing the plan instead")
@@ -1163,4 +1232,22 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// claimWatchLine reports whether the LIVENESS timer is running — the same conjunction discipline
+// as claimEnforcement. Arbitration that only fires on carrier edges cannot recover a stranded
+// address on a quiet network, so "armed and enforcing" is not the whole story: it says what
+// happens when something CHANGES, and this says what happens when nothing does.
+func claimWatchLine() string {
+	out, err := run("systemctl", "is-active", "netgov-claim-watch.timer")
+	switch {
+	case err == nil && strings.TrimSpace(out) == "active":
+		return "liveness: claim-watch timer ACTIVE — a stranded address self-recovers within ~60s"
+	case strings.TrimSpace(out) == "inactive" || strings.TrimSpace(out) == "failed":
+		return "liveness: claim-watch timer NOT RUNNING — arbitration fires on carrier events ONLY," +
+			" so a failed claim on a quiet network stays stranded (`netgov install` to fix)"
+	default:
+		return "liveness: claim-watch timer NOT INSTALLED — arbitration fires on carrier events ONLY," +
+			" so a failed claim on a quiet network stays stranded (`netgov install` to fix)"
+	}
 }

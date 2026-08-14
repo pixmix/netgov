@@ -164,6 +164,16 @@ import (
 // the OLD controls — which is how 2.23's new column appeared to be missing when it was being served
 // correctly all along. The page now knows which build it was loaded from and offers a reload.
 //
+// 2.25 closes the LIVENESS gap: arbitration was edge-triggered only. A failed claim sets a 300s
+// cooldown to stop a hot loop, which it does — but if the network then goes quiet no further
+// carrier event arrives, the cooldown lapses unwatched, and the guarded address stays held by
+// NOBODY. c-001 measured 19 minutes of that on .153, ended by a human. The cooldown correctly
+// prevents a hot loop and accidentally guarantees a cold one never resolves, and the quieter the
+// network the longer it stays stranded. A 60s timer (netgov-claim-watch) now runs a probe-free
+// pre-check and only escalates to real arbitration when the address is stranded or the preferred
+// leg has come back. Installed and enabled by `netgov install`, NOT by arming: it is a watchdog
+// over the arbitration you already armed, and a watchdog that needs arming is off when you need it.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -175,7 +185,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.24"
+const artefactVersion = "netgov/2.25"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

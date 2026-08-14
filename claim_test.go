@@ -131,3 +131,46 @@ func TestRouteGetParse(t *testing.T) {
 		}
 	}
 }
+
+// The liveness gap c-001 measured: a failed claim plus a quiet network left .153 held by NOBODY
+// for 19 minutes, because arbitration only runs on carrier edges and no edge arrived. These assert
+// the pre-check that decides whether the timer does anything — and it is exactly the kind of logic
+// you cannot check by watching a healthy box, because a healthy box never enters the state.
+
+func claimOf(holderHasAddr string) *Claim {
+	return &Claim{Address: "192.168.222.186", Claimants: []Claimant{
+		{Dev: "eno1", Priority: 100}, {Dev: "wlp0s20f3", SSIDs: []string{"CNNet"}, Priority: 50}}}
+}
+
+// Nobody holds it. This is the measured 19-minute failure and it MUST trigger a re-attempt.
+func TestClaimNeedsAttention_StrandedAddressTriggers(t *testing.T) {
+	cl := claimOf("")
+	// Devices named here do not exist on the test host, so currentHolder finds no holder —
+	// which is precisely the stranded state.
+	need, why := claimNeedsAttention(cl)
+	if !need {
+		t.Fatalf("an address held by nobody must trigger a re-attempt; got no-op (%s)", why)
+	}
+	if !contains(why, "STRANDED") {
+		t.Errorf("the reason must name the condition so a log line is actionable; got %q", why)
+	}
+}
+
+// The pre-check must never be the thing that DECIDES a move — it only decides whether the
+// expensive probe is worth running. Carrier is not health (the invariant this project paid for
+// twice), so a carrier-up higher-priority leg is a reason to LOOK, not a reason to move.
+func TestClaimNeedsAttention_IsAGateNotAVerdict(t *testing.T) {
+	// A claim whose only claimant is absent: no holder, so it asks for a re-attempt. The point is
+	// that claimNeedsAttention returns a REASON TO EVALUATE; claimEvaluate still runs the probe
+	// and can decline. If this ever short-circuits to an action, the loss-fraction gate is bypassed.
+	cl := &Claim{Address: "10.99.99.99", Claimants: []Claimant{{Dev: "nosuchdev0", Priority: 10}}}
+	need, _ := claimNeedsAttention(cl)
+	if !need {
+		t.Fatal("no holder must ask for evaluation")
+	}
+	// And the verdict path must still be the probe-driven one: an absent device cannot be eligible.
+	v := claimEvaluate(cl)
+	if v.Winner != "" {
+		t.Fatalf("an absent device must not win on the pre-check's say-so; got winner %q", v.Winner)
+	}
+}

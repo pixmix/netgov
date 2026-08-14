@@ -780,10 +780,62 @@ WantedBy=multi-user.target
 		fmt.Fprintln(os.Stderr, "PARTIAL INSTALL: the dispatcher hook at "+dst+" WAS replaced; the systemd unit was NOT. Re-run `netgov install` once the cause is cleared.")
 		os.Exit(1)
 	}
+	// netgov-claim-watch.{service,timer} — the LIVENESS half of arbitration (2.25).
+	//
+	// The dispatcher hook covers carrier EDGES. This covers the absence of them: a failed claim
+	// followed by a quiet network left .153 held by NOBODY for 19 minutes (c-001, n-243 §3),
+	// because the cooldown lapsed with nothing watching. `claim tick` is probe-free unless the
+	// address is actually stranded or the preferred leg has come back, so a 60s cadence costs
+	// nothing on the normal case. Enabled by INSTALL, not by arming: it never moves an address
+	// on its own — it only re-runs the arbitration the operator already armed, and refuses when
+	// disarmed. A watchdog that needs arming is a watchdog that is off when you need it.
+	watchUnit := fmt.Sprintf(`[Unit]
+Description=netgov claim liveness tick (re-attempt a stranded address without waiting for a carrier event)
+After=network-online.target NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=%s claim tick --state %s
+`, bin, sp)
+	watchTimer := `[Unit]
+Description=netgov claim liveness tick every 60s
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=60
+AccuracySec=10
+
+[Install]
+WantedBy=timers.target
+`
+	for _, f := range []struct{ name, body, dst string }{
+		{"netgov-claim-watch.service", watchUnit, "/etc/systemd/system/netgov-claim-watch.service"},
+		{"netgov-claim-watch.timer", watchTimer, "/etc/systemd/system/netgov-claim-watch.timer"},
+	} {
+		tmpW := filepath.Join(stage, f.name)
+		must(os.WriteFile(tmpW, []byte(f.body), 0o644))
+		cw := exec.Command("sudo", "-A", "install", "-m", "0644", "-o", "root", "-g", "root", tmpW, f.dst)
+		cw.Env = askpassEnv()
+		cw.Stdin, cw.Stdout, cw.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cw.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "claim-watch install failed ("+f.name+"):", err)
+			fmt.Fprintln(os.Stderr, "PARTIAL INSTALL: hook and roled unit landed; the liveness timer did NOT. Arbitration still works on carrier events but a stranded address will not self-recover.")
+			os.Exit(1)
+		}
+	}
+
 	reload := exec.Command("sudo", "-A", "systemctl", "daemon-reload")
 	reload.Env = askpassEnv()
 	reload.Stdin, reload.Stdout, reload.Stderr = os.Stdin, os.Stdout, os.Stderr
 	_ = reload.Run()
+	// Enable the liveness timer at INSTALL. It is a watchdog over the arbitration the operator
+	// already armed, not a second thing to arm — and it takes no action while disarmed.
+	if err := runPriv("systemctl", "enable", "--now", "netgov-claim-watch.timer"); err != nil {
+		fmt.Fprintln(os.Stderr, "WARNING: netgov-claim-watch.timer installed but NOT enabled ("+err.Error()+
+			") — arbitration still runs on carrier events, but a stranded address will not self-recover. Enable it manually.")
+	} else {
+		fmt.Println("installed + enabled: netgov-claim-watch.timer (60s liveness tick; no-op while disarmed)")
+	}
 	fmt.Println("installed systemd unit:", uDst, "(disarmed; enable with `netgov arm`)")
 }
 
