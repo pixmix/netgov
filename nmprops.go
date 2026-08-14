@@ -58,6 +58,38 @@ type NMSaved struct {
 	Original string `json:"original"`
 }
 
+// governanceLines answers "who actually decides the path here — netgov or NetworkManager?"
+//
+// WHY (c-001, n-243, 2026-08-14): after 2.21 landed they verified the box and found the capability
+// present and governing nothing — the toggle was off, so NM still decided every metric. Their
+// point: *"the version number and the effective state are two different facts, and on this box only
+// the first one changed. netgov/2.21 tells you the capability exists on disk, not that it governs
+// anything."*
+//
+// That is `armed=true is not a state` one level up, and it misreads in the dangerous direction: a
+// future session reads a deployment table, sees 2.21, concludes netgov owns the metric here, and
+// therefore does NOT look at NM — which is still the thing deciding. A version is an intention; the
+// enforceable state is version AND toggle AND properties actually adopted.
+func governanceLines(st *State) []string {
+	on := st.ManageMetrics != nil && *st.ManageMetrics
+	if !on {
+		return []string{"metrics: NETWORKMANAGER decides the path — netgov capability present but not governing" +
+			" (netgov uplink manage-metrics on); claim priority does NOT set the route metric"}
+	}
+	var adopted []string
+	for _, s := range st.NMSaved {
+		if s.Prop == "ipv4.route-metric" {
+			adopted = append(adopted, s.Profile+" (was "+dash(s.Original)+")")
+		}
+	}
+	if len(adopted) == 0 {
+		return []string{"metrics: netgov is ENABLED but has adopted nothing yet — run `netgov apply`" +
+			" (nothing is saved, so `reset` currently has nothing to restore)"}
+	}
+	return []string{"metrics: NETGOV decides the path, from claim priority — adopted " +
+		strings.Join(adopted, ", ") + "; `netgov reset` restores those originals"}
+}
+
 // canDefaultStr renders the tri-state for humans. "auto" and "yes" must not look alike: one means
 // netgov holds the property, the other means it does not hold it at all.
 func canDefaultStr(b *bool) string {

@@ -145,6 +145,13 @@ import (
 // no-op: the pre-netgov value of every property is recorded ONCE and put back on reset. See
 // nmprops.go for why once is the load-bearing word.
 //
+// 2.22 reports WHO GOVERNS the path — netgov or NetworkManager — beside the route disposition.
+// c-001 verified 2.21 on WS and found the capability present and governing nothing (the toggle was
+// off, so NM still decided every metric): "the version number and the effective state are two
+// different facts, and on this box only the first one changed." That is armed-is-an-intention one
+// level up, and it misreads in the dangerous direction — a reader who sees 2.21 and concludes
+// netgov owns the metric will therefore NOT look at NM, which is still deciding.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -156,7 +163,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.21"
+const artefactVersion = "netgov/2.22"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

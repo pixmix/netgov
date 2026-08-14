@@ -1136,6 +1136,11 @@ func cmdClaim(st *State, args []string) {
 		for _, l := range claimPaths(cl, currentHolder(cl)) {
 			fmt.Println(l)
 		}
+		// And WHO decides that path. A version says the capability is on disk; this says whether
+		// it governs anything. (2.22, c-001)
+		for _, l := range governanceLines(st) {
+			fmt.Println(" " + l)
+		}
 	case "apply":
 		if !claimArmed() {
 			fmt.Println(" refusing to apply: not armed (netgov claim arm) — showing the plan instead")

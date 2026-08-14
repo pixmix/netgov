@@ -120,6 +120,10 @@ type stateView struct {
 	// the badge does not have to grep prose. (2.20)
 	ClaimPaths     []string `json:"claim_paths"`
 	ClaimPathSplit bool     `json:"claim_path_split"`
+
+	// MetricGovernance says whether netgov or NetworkManager actually decides the path. The
+	// version tells you the capability is installed; this tells you it governs. (2.22, c-001)
+	MetricGovernance []string `json:"metric_governance"`
 }
 
 // patternRulesText renders a pattern's rules as one "selector via [fam]" line each
@@ -172,6 +176,7 @@ func buildView() stateView {
 		Armed: st.Armed, Active: st.ActivePattern,
 		Version: artefactVersion, Source: artefactSource(), ClaimArmed: claimArmed()}
 	v.ClaimEnforcing, v.ClaimChecks = claimEnforcement()
+	v.MetricGovernance = governanceLines(st)
 	if cl := claimForActive(st); cl != nil {
 		v.ClaimPaths = claimPaths(cl, currentHolder(cl))
 		for _, l := range v.ClaimPaths {
