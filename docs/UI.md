@@ -5,10 +5,21 @@ The dashboard is a single localhost page served by `netgov web` (or the
 control maps to a `netgov …` command. Status auto-refreshes every ~15 s (paused
 while you're typing in a field).
 
-> **Safety model.** netgov only ever *adds* `ip rule`s in the priority band
-> 8000–29999 and routes in tables 100–199. It never edits your main routing table
-> or your NetworkManager profiles. **Restore** (or `netgov reset`) removes exactly
-> that and your OS/NM baseline reappears. Nothing here is destructive.
+> **Safety model.** netgov's routing engine only ever *adds* `ip rule`s in the
+> priority band 8000–29999 and routes in tables 100–199, and never edits your main
+> routing table. **Restore** (or `netgov reset`) removes exactly that.
+>
+> **Since 2.21 there are two exceptions, both opt-in:** the per-uplink **default
+> route** selector (`ipv4.never-default`) and route metrics derived from claim
+> priority (`ipv4.route-metric`). These *are* NetworkManager profile edits — they
+> had to be, because they are what actually decides which adapter carries traffic,
+> and leaving them alone meant netgov could report a policy applied while the
+> profile silently overruled it. **Reset restores them**: the value each property
+> had before netgov took it over is saved once and put back.
+>
+> A `default route` cell set to **auto** means netgov does not hold that property.
+> Metrics stay NetworkManager's until you run `netgov uplink manage-metrics on`.
+> The claim card tells you which of the two is currently governing.
 
 ---
 

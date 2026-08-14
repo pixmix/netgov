@@ -46,10 +46,30 @@ working). IPv6 defaults to `block` when the host has no global IPv6 (leak-protec
 
 ### Safe by design
 
-netgov only writes `ip rule`s in the priority band **8000–29999** and routes in
-tables **100–199**. It never edits the main table or your NetworkManager profiles.
-`netgov reset` flushes exactly that owned band and the OS networking baseline
-reappears — there is no persistent change to undo.
+The **routing engine** only writes `ip rule`s in the priority band **8000–29999**
+and routes in tables **100–199**, and never edits the main table. `netgov reset`
+flushes exactly that owned band and the OS networking baseline reappears.
+
+**Two NetworkManager profile properties are the exception, and they are opt-in**
+(since 2.21). `ipv4.never-default` — whether an uplink may carry the default route
+at all — and `ipv4.route-metric`, which decides *which adapter actually carries
+traffic*. netgov used to leave both alone, which meant it could accept
+`default set --v4 cable`, report it applied, and be silently overruled by the
+profile; and it could hold an address on one adapter while the host spoke from
+another. So it now owns them, and **`reset` became save-and-restore rather than a
+no-op**: the value each property had *before* netgov first took it over is recorded
+**once** and put back on reset.
+
+- Per-uplink `default-route` is `yes` / `no` / **`auto`** — `auto` means netgov does
+  not hold the property at all, and is the default.
+- Route metrics are off until `netgov uplink manage-metrics on`. Upgrading the
+  binary changes nothing on its own: the apply path runs from the NetworkManager
+  dispatcher on carrier events, so enabling by default would hand netgov two host
+  properties at the next link flap on a box whose operator never asked.
+- `netgov plan` prints the NM half separately, with the reason beside each change,
+  before anything is written. `netgov claim status` reports whether **netgov or
+  NetworkManager** currently governs the path — a version tells you the capability
+  is installed, not that it governs anything.
 
 ---
 

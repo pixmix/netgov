@@ -27,6 +27,38 @@ netgov uplink define <name> --dev <iface> [--gw <ip>]
 netgov uplink del <name>
 ```
 
+### Who decides the path (2.21+)
+
+Two NetworkManager profile properties decide which adapter actually carries
+traffic. netgov can own them; **both are opt-in, and `reset` restores whatever
+they were before netgov first took them over.**
+
+```
+netgov uplink default-route <name> yes|no|auto
+netgov uplink manage-metrics on|off
+```
+
+`default-route` maps to `ipv4.never-default` — whether this uplink may carry the
+default route **at all**. A `never-default` profile silently overrules
+`netgov default set --v4 <that uplink>`, which is why the property is here rather
+than left invisible.
+
+| value | meaning |
+|---|---|
+| `yes` | may carry the default route (`ipv4.never-default no`) |
+| `no` | may **not** — e.g. a cable to a router you do not want capturing your egress |
+| `auto` | **netgov does not hold the property**; NetworkManager keeps whatever it has. The default. |
+
+`manage-metrics on` derives `ipv4.route-metric` from **claim priority**, so the
+adapter your claim says is preferred is also the one the host speaks from. Without
+it, an arbiter can hold an address on one adapter while every packet leaves on
+another — true, and not what the verdict is read as.
+
+**Nothing is written until `netgov apply`.** Run `netgov plan` first: the NM half is
+printed separately, with the reason beside each change. `netgov claim status` reports
+whether **netgov or NetworkManager** currently governs the path — the version tells
+you the capability is installed, not that it governs anything.
+
 ## Rules & default
 
 ```
