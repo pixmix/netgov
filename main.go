@@ -28,12 +28,175 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
+
+// artefactVersion is netgov's declared version under the mesh `artefact-versioning` policy.
+// A compiled binary carries no marker comment, so it declares over its own interface (--version).
+//
+// Major 2, not the 1.0 retrofit floor: the named-AP library rework replaced device-keyed APs
+// with a named library and required a state.json migration — an incompatible change by the
+// policy's own definition (a consumer must be updated too). 1.x was the original uplink/rule/
+// default engine plus the roled-style patterns layer.
+//
+// 2.1 adds, all additive/compatible: `claim set`/`claim clear`, `claim` in /api/state, the
+// pattern-builder claim editor, and ETag/Cache-Control validators on the served page.
+//
+// 2.2 adds, additive: `version`+`source` in /api/state and the header build badge, the claim
+// documentation in the embedded help, and the wrapped-bullet fix in its markdown renderer.
+//
+// 2.3 adds a gateway-ARP reachability test to claimant eligibility. Additive but behaviour-
+// changing for arbitration: a claimant whose link negotiates yet passes no frames is now
+// INELIGIBLE where it previously outranked a working one. Requires `arping` (iputils-arping);
+// absent, the probe fails open and eligibility is carrier+association as in 2.2.
+//
+// 2.4 is docs only: the claim-on-the-floor recipe for a server that wants arbitration without
+// egress policy, and the warning that an AUTO-created floor carries v6=block (right for a
+// travelling laptop, wrong for a server). Versioned because /help embeds these files, so the
+// docs ARE part of the shipped artefact.
+//
+// 2.5 is docs only: both arm tables named the arbiter's mechanism ("create/remove the file")
+// instead of its verb `netgov claim arm`, and neither said the dashboard has no control for it.
+// The operator went looking for a button that does not exist. Documenting a mechanism where a
+// user needs an instruction is a way of being accurate and unhelpful at the same time.
+//
+// 2.6 adds the dashboard control 2.5 had to apologise for: `claim_armed` in /api/state and an
+// "address arbitration" row with its own badge, Arm/Disarm and a confirm that names the address
+// and the adapters it may move between. Separate row, separate endpoint, separate badge from the
+// pattern loop -- the two arm different things and one word for both is what misled the operator.
+//
+// 2.7 makes the arm flag ENFORCE something. Arbitration was reachable only from pattern
+// activation, which is the wrong trigger (a carrier change does not change which pattern is
+// satisfiable), so an armed arbiter never ran on the event it exists for. The NM dispatcher hook
+// now runs `claim apply` on link up/down, mutexed against its own re-entry. REQUIRES `netgov
+// install` to be re-run on an existing host -- the hook on disk is from whenever it was last
+// installed, so upgrading the binary alone leaves the gap open.
+//
+// 2.8 makes the CLI safe to interrogate: `--help`/`-h`/`help` anywhere in the arguments now prints
+// and exits for EVERY verb, before any dispatch. `netgov web --help` used to start the dashboard.
+// Adds docs/OPERATING.md (embedded in /help): a verb table with MUTATES?/NEEDS-ROOT? columns, the
+// ownership/escalation model, what "armed" enforces, and the pure-arbitration worked example.
+//
+// 2.9 replaces the gateway probe's ANY-REPLY test with a LOSS FRACTION over 10 probes against a
+// 10% ceiling, reports the fraction rather than a verdict, and probes claimants concurrently.
+// The old "arping -c 2" passed on 1-of-2, i.e. a 42% chance of certifying a 76%-loss leg — and
+// under an any-reply rule more probes make a wrong pass MORE likely, so the rule had to change.
+//
+// 2.10 stops a nil slice blanking the dashboard. Go marshals nil as JSON `null`, the client mapped
+// over uplinks unguarded, and the throw killed EVERY later render step -- patterns table, claim
+// badge, version badge -- on precisely the uplink-less host configured for pure arbitration.
+// Fixed at three levels: buildView never emits null for a collection, the client guards, and
+// render() is wrapped so a render bug announces itself instead of truncating the page.
+//
+// 2.11 makes an address move a TRANSACTION. The old reconcile released the loser, checked the
+// winner immediately (losing the DHCP race every time), and reported the miss as a WARNING --
+// leaving the address held by nobody. It now waits for the winner to acquire and ROLLS BACK to
+// the previous holder if it does not.
+//
+// 2.12 fixes `install` staging through FIXED-NAME files in /tmp. Under fs.protected_regular=2 a
+// sticky world-writable dir refuses even root a write-open on a file it does not own, so once
+// anyone had run install with different privileges every later run failed — and could
+// half-complete, leaving the dispatcher hook updated and the systemd unit stale.
+//
+// 2.13 takes the binary path for the generated hook and unit from os.Executable() instead of
+// $HOME. Under `sudo netgov install` the old derivation baked /root/bin/netgov — a path that does
+// not exist — so both would fail silently on every carrier event, i.e. armed-but-unenforcing
+// reintroduced through the install path, and invisible unless you read the generated file.
+//
+// 2.14 additionally REFUSES to install a hook whose binary path does not exist (c-001), turning
+// any residual case of that class from a silent no-op into an install-time error.
+//
+// 2.15 corrects the VERIFICATION the operating doc prescribed: it told custodians to confirm the
+// hook with `grep -c claim`, which proves the hook MENTIONS the verb, not that it can execute the
+// binary. c-001 followed it exactly and reported a dead arbiter as live. The proxy was in my
+// documentation, so the doc is where it had to be fixed.
+//
+// 2.16 fixes the two faults that stranded .186: a no-incumbent case that failed silently, and a
+// dispatcher loop that re-triggered itself indefinitely (the cooldown gate).
+//
+// 2.17 stops `--state` writing production state from a hand-run check, and stops DUPLICATE ARP
+// replies counting as distinct successes — a proxy medium answering twice read as perfect health.
+//
+// 2.18 reports the ENFORCEMENT CONJUNCTION rather than the arm flag (c-016): armed AND hook
+// present AND hook executable AND probe capable. Any one missing is an armed box arbitrating
+// nothing, and all three of those hid behind a single boolean on the night of 2026-08-13/14.
+//
+// 2.19 documents what a probe PASS means and what it does not — the loss fraction certifies the
+// leg at the moment it was measured, not the leg.
+//
+// 2.20 reports the ROUTE DISPOSITION beside the holder. c-019 measured this box and found
+// `claim status` saying `OK: enp114s0 already holds .153 exclusively` — true, and every packet
+// the host originated leaving over a second adapter holding a second address on the same subnet
+// at a lower metric. The arbiter's guarantee and the property a reader takes from it had come
+// apart with every check green. Nothing was wrong with the arbiter; the defect was that its own
+// output could not see the condition. See claimPaths.
+//
+// 2.21 takes ownership of the two NetworkManager profile properties that decide which adapter
+// carries traffic — `ipv4.never-default` (per-uplink toggle, tri-state, nil = unmanaged) and
+// `ipv4.route-metric` (derived from claim priority). Operator ruling: "if someone still needs to
+// manually tamper something else, then netgov is not doing all the job it should." This gives up
+// netgov's absolute never-writes-NM promise, so `reset` becomes save-and-restore rather than a
+// no-op: the pre-netgov value of every property is recorded ONCE and put back on reset. See
+// nmprops.go for why once is the load-bearing word.
+//
+// 2.22 reports WHO GOVERNS the path — netgov or NetworkManager — beside the route disposition.
+// c-001 verified 2.21 on WS and found the capability present and governing nothing (the toggle was
+// off, so NM still decided every metric): "the version number and the effective state are two
+// different facts, and on this box only the first one changed." That is armed-is-an-intention one
+// level up, and it misreads in the dangerous direction — a reader who sees 2.21 and concludes
+// netgov owns the metric will therefore NOT look at NM, which is still deciding.
+//
+// (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
+// in its own commit, as the rule below requires, but none extended this block. A version history
+// that stops four releases short is the same class of defect as a stale version — the record of
+// what shipped, disagreeing with what shipped.)
+//
+// BUMP THE MINOR IN THE SAME COMMIT AS THE CHANGE. 2.0 was left standing across four builds
+// that each added behaviour (e1a943e -> b4977ef), so `ver --check` read *ok/same* for two
+// binaries that were not the same code, and the version check the mesh policy exists to enable
+// could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
+// version younger than the code it names is indistinguishable from being up to date — the exact
+// failure the policy was written to prevent, in the artefact that motivated the policy.
+const artefactVersion = "netgov/2.22"
+
+// artefactRepo is the canonical home of this source. The commit is read from the build stamp.
+const artefactRepo = "github:pixmix/netgov"
+
+// artefactSource reports repo + commit for rule 5 (provenance of a foreign-built artefact).
+// Go embeds vcs.revision/vcs.modified automatically when building from a git work tree, so this
+// needs no build flags. A dirty tree is reported as such rather than silently claiming the commit
+// — a binary built from uncommitted changes is not that commit, and saying so is the whole point.
+func artefactSource() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return artefactRepo + " (no build info)"
+	}
+	rev, dirty := "", false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return artefactRepo + " (no vcs stamp)"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if dirty {
+		return artefactRepo + " " + rev + "+dirty"
+	}
+	return artefactRepo + " " + rev
+}
 
 // ip rule priority bands we own (lower number wins).
 const (
@@ -55,6 +218,14 @@ type Uplink struct {
 	Table    int    `json:"table"`
 	Gateway  string `json:"gw,omitempty"`  // explicit v4 gw override (never-default LAN uplink)
 	Gateway6 string `json:"gw6,omitempty"` // explicit v6 gw override
+
+	// CanDefault is TRI-STATE and nil means UNMANAGED, not false. It maps to NM's
+	// `ipv4.never-default` (inverted): whether this uplink may carry the default route at all.
+	// Before 2.21 the property was invisible to netgov, which would accept `default set --v4
+	// cable`, report it applied, and be silently overruled by a `never-default` profile.
+	// nil-means-unmanaged is deliberate: netgov must not adopt a property nobody asked it to
+	// hold, because `reset` would then "restore" a value netgov invented. See nmprops.go.
+	CanDefault *bool `json:"can_default,omitempty"`
 }
 
 // Rule steers traffic to an uplink (Via) or drops it (Via=="block"). Exactly one of
@@ -95,6 +266,11 @@ type Pattern struct {
 	Rules     []Rule   `json:"rules,omitempty"` // domain/source pins active under this pattern
 	APs       []string `json:"aps,omitempty"`   // AP NAMES this pattern brings up (swapped in on activation)
 	Floor     bool     `json:"floor,omitempty"` // always-satisfiable fallback (Require ignored)
+
+	// Claim declares same-address arbitration for this pattern: one address, N adapters, exactly
+	// one holder chosen by priority. Inert unless this pattern is the ACTIVE one — address
+	// identity is a property of a site, not of the box. See claim.go.
+	Claim *Claim `json:"claim,omitempty"`
 }
 
 type State struct {
@@ -108,6 +284,17 @@ type State struct {
 	Patterns      []Pattern `json:"patterns,omitempty"`
 	Armed         string    `json:"armed,omitempty"`          // "" | "armed" | "dry"
 	ActivePattern string    `json:"active_pattern,omitempty"` // last selected/activated pattern
+
+	// ManageMetrics turns on deriving `ipv4.route-metric` from claim priority (2.21). nil/false =
+	// off, and that is the correct default on upgrade: the apply path runs from the NM dispatcher
+	// on carrier events, so enabling it by default would hand netgov a host property at the next
+	// link flap on every box that upgraded, without anyone asking. `netgov uplink manage-metrics on`.
+	ManageMetrics *bool `json:"manage_metrics,omitempty"`
+
+	// NMSaved holds the pre-netgov value of every NetworkManager property netgov has taken over,
+	// so `reset` is still a complete restore now that netgov writes NM profiles (2.21). Written
+	// exactly once per property — see nmprops.go for why that is the load-bearing part.
+	NMSaved []NMSaved `json:"nm_saved,omitempty"`
 
 	LegacyDefault string `json:"default,omitempty"` // migrated from v1
 }
@@ -261,7 +448,19 @@ func askpassEnv() []string {
 	return append(os.Environ(), "SUDO_ASKPASS="+filepath.Join(homeDir(), "bin", "sudo-askpass-zenity"))
 }
 
+// statePathOverride is set once from --state, so LOAD AND SAVE cannot disagree.
+//
+// main() resolved --state for the load and then every verb called saveState(st, statePath()),
+// which re-resolved to the DEFAULT path. So `pat-set --state /tmp/copy.json` read the copy and
+// WROTE PRODUCTION. That is worse than not supporting the flag: it is a footgun aimed exactly at
+// the person being careful, and it fired on 2026-08-14 while I was setting up a test on a copy
+// precisely to avoid touching the operator's live state. It wrote a stray pattern into it.
+var statePathOverride string
+
 func statePath() string {
+	if statePathOverride != "" {
+		return statePathOverride
+	}
 	if p := os.Getenv("NETGOV_STATE"); p != "" {
 		return p
 	}
@@ -643,6 +842,19 @@ func applyRoot(st *State) {
 			fmt.Fprintf(os.Stderr, "  ! %s -> %v %s\n", strings.Join(c, " "), err, out)
 		}
 	}
+	// NM profile properties netgov owns (2.21): never-default + route-metric from claim priority.
+	// AFTER the rule build, deliberately — the rules are netgov's own reversible band and land
+	// whatever happens, while this touches the host's profiles and can prompt a reapply.
+	if n, notes := applyUplinkRouting(st); n > 0 || len(notes) > 0 {
+		for _, l := range notes {
+			fmt.Println("  " + l)
+		}
+		if n > 0 {
+			fmt.Printf("netgov: %d NM propert%s taken over (originals saved; `netgov reset` restores them)\n",
+				n, map[bool]string{true: "y", false: "ies"}[n == 1])
+			saveStateKeepOwner(st, statePath())
+		}
+	}
 	fmt.Printf("netgov: applied (%d cmds, %d errors)\n", len(build), errs)
 }
 
@@ -655,7 +867,17 @@ func resetRoot(st *State) {
 	for _, c := range clean {
 		_, _ = run(c...)
 	}
-	fmt.Printf("netgov: reset — %d cleanup cmds; NetworkManager baseline restored\n", len(clean))
+	// Restore every NM property netgov took over (2.21). Without this, "NetworkManager baseline
+	// restored" below would be a claim the tool no longer earns.
+	nm := restoreNMProps(st)
+	for _, l := range nm {
+		fmt.Println("  " + l)
+	}
+	if len(nm) > 0 {
+		saveStateKeepOwner(st, statePath())
+	}
+	fmt.Printf("netgov: reset — %d cleanup cmds, %d NM propert%s restored; NetworkManager baseline restored\n",
+		len(clean), len(nm), map[bool]string{true: "y", false: "ies"}[len(nm) == 1])
 }
 
 // privileged re-exec via sudo -A (zenity)
@@ -1137,10 +1359,46 @@ func main() {
 	}
 	cmd, rest := args[0], args[1:]
 
-	sp := statePath()
-	if v, ok := flagVal(rest, "--state"); ok {
-		sp = v
+	// Declared artefact version (mesh policy `artefact-versioning`). Answered BEFORE any state
+	// is loaded: asking an artefact what it is must never depend on its runtime state, and a
+	// binary has no marker comment to read, so this handler IS the declaration.
+	// GLOBAL --help GUARD, ANSWERED BEFORE ANY DISPATCH.
+	//
+	// `netgov web --help` used to START THE DASHBOARD: `web` ignored unknown flags, so the one
+	// thing an operator types to find out what a command does was itself the command doing it.
+	// c-001 hit this on a production host (n-223), and the sibling case cost more — `web install`
+	// ran as root on a box with passwordless sudo and left a root-owned state.json behind.
+	//
+	// A help request must NEVER act. Anywhere in the argument list, for any verb, it prints and
+	// exits — so interrogating an unfamiliar verb is always safe, which is the property the
+	// operator actually needs from a CLI that can move addresses and rewrite routing.
+	for _, a := range args {
+		if a == "--help" || a == "-h" || a == "help" {
+			usage()
+			return
+		}
 	}
+
+	if cmd == "--version" || cmd == "version" {
+		fmt.Println(artefactVersion)
+		// Build target, line 2 (artefact-versioning rule 13). Taken from the Go runtime, so it is
+		// baked in at compile time and cannot disagree with the binary it describes. Without this
+		// a fleet check has no channel to tell two cross-compiled builds apart and will happily
+		// instruct deploying one architecture over another as a plain "upgrade".
+		fmt.Printf("# artefact-target: %s-%s\n", runtime.GOOS, runtime.GOARCH)
+		// Provenance, line 3 (rule 5): netgov is built from its OWN repo and installed into ~/bin,
+		// so the binary must say where it came from — ~/bin has no way to know. Read from the
+		// VCS stamp Go embeds automatically, NOT from -ldflags: the host custodian builds this
+		// with a plain `go build`, and provenance that depends on remembering a build flag is
+		// provenance that will be missing exactly when someone is in a hurry.
+		fmt.Printf("# artefact-source: %s\n", artefactSource())
+		return
+	}
+
+	if v, ok := flagVal(rest, "--state"); ok {
+		statePathOverride = v // set BEFORE anything resolves a path, so saves follow the load
+	}
+	sp := statePath()
 	st := loadState(sp)
 
 	switch cmd {
@@ -1165,6 +1423,24 @@ func main() {
 		fmt.Printf("# netgov dry-run — %d cmds (nothing executed)\n", len(build))
 		for _, c := range build {
 			fmt.Println("  " + strings.Join(c, " "))
+		}
+		// The NM half is shown SEPARATELY and last, because it is the half that leaves the
+		// reversible band. The operator's standing rule for this box is that anything which can
+		// flip routing must be inspectable in safe mode first; this is that inspection.
+		nmc, reapply, notes := uplinkRoutingPlan(st)
+		fmt.Printf("# NM profile properties netgov would take over — %d change(s)\n", len(nmc))
+		for _, l := range notes {
+			fmt.Println("  " + l)
+		}
+		for _, c := range nmc {
+			fmt.Println("  " + strings.Join(c, " "))
+		}
+		if len(reapply) > 0 {
+			fmt.Println("  nmcli device reapply " + strings.Join(reapply, " ") +
+				"   (in place — never a down/up, which would drop the link being tuned)")
+		}
+		if len(nmc) > 0 {
+			fmt.Println("  originals would be saved to state; `netgov reset` restores them")
 		}
 	case "link":
 		cmdLink(rest)
@@ -1196,6 +1472,8 @@ func main() {
 	case "__eval-apply":
 		fmt.Println("eval ->", evalPattern(st, true))
 		saveStateKeepOwner(st, sp)
+	case "claim":
+		cmdClaim(st, rest)
 	case "arm":
 		cmdArm(st, rest)
 	case "disarm":
@@ -1214,8 +1492,56 @@ func cmdUplink(st *State, args []string) {
 	switch args[0] {
 	case "list":
 		for _, u := range st.Uplinks {
-			fmt.Printf("  %-8s dev=%-16s table=%d gw=%s\n", u.Name, u.Dev, u.Table, dash(u.Gateway))
+			fmt.Printf("  %-8s dev=%-16s table=%d gw=%-15s default-route=%s\n",
+				u.Name, u.Dev, u.Table, dash(u.Gateway), canDefaultStr(u.CanDefault))
 		}
+	case "manage-metrics":
+		if len(args) < 2 {
+			fmt.Printf("  manage-metrics: %s\n", map[bool]string{true: "ON — route metrics follow claim priority", false: "off — NetworkManager decides"}[st.ManageMetrics != nil && *st.ManageMetrics])
+			fmt.Println("  usage: netgov uplink manage-metrics on|off")
+			return
+		}
+		on := args[1] == "on" || args[1] == "yes" || args[1] == "true"
+		st.ManageMetrics = &on
+		must(saveState(st, statePath()))
+		if on {
+			fmt.Println("manage-metrics ON — netgov will set ipv4.route-metric from claim priority.")
+			fmt.Println("Nothing has changed yet: run `netgov plan` to see exactly what would be written,")
+			fmt.Println("then `netgov apply`. Originals are saved on first take-over; `netgov reset` restores them.")
+			return
+		}
+		fmt.Println("manage-metrics off — netgov will stop setting metrics.")
+		fmt.Println("Already-taken-over properties are NOT reverted by this switch; `netgov reset` does that.")
+	case "default-route":
+		// netgov uplink default-route <name> yes|no|auto
+		if len(args) < 3 {
+			fmt.Println("usage: netgov uplink default-route <name> yes|no|auto")
+			fmt.Println("  yes  = this uplink MAY carry the default route (ipv4.never-default no)")
+			fmt.Println("  no   = it may NOT (ipv4.never-default yes) — e.g. a cable to an untrusted router")
+			fmt.Println("  auto = netgov does not manage it; whatever NM has, stays")
+			os.Exit(2)
+		}
+		u := upByName(st, args[1])
+		if u == nil {
+			fmt.Fprintln(os.Stderr, "no such uplink:", args[1])
+			os.Exit(1)
+		}
+		switch strings.ToLower(args[2]) {
+		case "yes", "on", "true":
+			t := true
+			u.CanDefault = &t
+		case "no", "off", "false":
+			f := false
+			u.CanDefault = &f
+		case "auto", "unmanaged", "":
+			u.CanDefault = nil
+		default:
+			fmt.Fprintln(os.Stderr, "expected yes|no|auto, got:", args[2])
+			os.Exit(1)
+		}
+		must(saveState(st, statePath()))
+		fmt.Printf("uplink %s default-route=%s — run `netgov plan` to see the change, `netgov apply` to make it\n",
+			u.Name, canDefaultStr(u.CanDefault))
 	case "define":
 		if len(args) < 2 {
 			fmt.Println("usage: netgov uplink define <name> --dev <iface> [--gw <ip>] [--table N]")
@@ -1563,6 +1889,7 @@ func evalPattern(st *State, apply bool) string {
 		activatePattern(st, p)
 		applyRoot(st)
 		applyPatternAPs(st, p)
+		applyPatternClaim(p)
 		if !patternHasDuty(p) || validatePattern(st, p) {
 			return p.Name
 		}
@@ -1795,6 +2122,9 @@ func usage() {
                         [--v4 U|block|direct] [--v6 ..] [--snapshot] [--floor]
   pat-del <name> | pat-apply <name>            delete / manually activate a pattern
   eval [--apply]                               pick best satisfiable pattern (dry, or apply)
+  claim [status|eval|apply|arm|disarm]         same-address arbitration for the ACTIVE pattern's
+                                               claim group (one address, N adapters, priority);
+                                               separate arm flag, boots disarmed
   arm [--dry] | disarm                         root failover loop (auto pattern selection); boots disarmed
   web [--addr 127.0.0.1:8474] | install`)
 }

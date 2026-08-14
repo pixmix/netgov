@@ -5,10 +5,21 @@ The dashboard is a single localhost page served by `netgov web` (or the
 control maps to a `netgov …` command. Status auto-refreshes every ~15 s (paused
 while you're typing in a field).
 
-> **Safety model.** netgov only ever *adds* `ip rule`s in the priority band
-> 8000–29999 and routes in tables 100–199. It never edits your main routing table
-> or your NetworkManager profiles. **Restore** (or `netgov reset`) removes exactly
-> that and your OS/NM baseline reappears. Nothing here is destructive.
+> **Safety model.** netgov's routing engine only ever *adds* `ip rule`s in the
+> priority band 8000–29999 and routes in tables 100–199, and never edits your main
+> routing table. **Restore** (or `netgov reset`) removes exactly that.
+>
+> **Since 2.21 there are two exceptions, both opt-in:** the per-uplink **default
+> route** selector (`ipv4.never-default`) and route metrics derived from claim
+> priority (`ipv4.route-metric`). These *are* NetworkManager profile edits — they
+> had to be, because they are what actually decides which adapter carries traffic,
+> and leaving them alone meant netgov could report a policy applied while the
+> profile silently overruled it. **Reset restores them**: the value each property
+> had before netgov took it over is saved once and put back.
+>
+> A `default route` cell set to **auto** means netgov does not hold that property.
+> Metrics stay NetworkManager's until you run `netgov uplink manage-metrics on`.
+> The claim card tells you which of the two is currently governing.
 
 ---
 
@@ -119,15 +130,71 @@ automatically.
   AP and STA on one radio).
 - *rules* — one per line: `selector uplink [fam]`, where selector is a `domain` or
   `from:CIDR`. e.g. `api.example.com wifi` or `from:172.18.0.0/16 cable`.
+- *claim* — **same-address arbitration** (see below): `<address> <dev:prio[:ssid,…]>…`,
+  e.g. `192.168.222.153 enp114s0:100 wlo1:50:CNNet`. Leave empty for none.
 - **↧ snapshot current** — fill v4/v6/rules and tick the active AP from your *current*
   live config, so "save what I have now as a profile" is one click.
 
 Per row: **activate** (switch to it now), **edit** (load into the builder), **×**
-(delete). The badge by the title shows `ARMED · mode` or `disarmed`.
+(delete). The badge by the title shows `ARMED · mode` or `disarmed`. A row carrying a
+claim is marked with the address it can move (`⇄192.168.222.153`) — this is the one
+pattern property that can **move an address between adapters**, so it is visible at a
+glance rather than only on edit.
 
 CLI: `netgov pat-set <name> <prio> [--require a,b] [--ssid S --ssid-iface <uplink>]
 [--ap <name,…>] [--v4 …] [--v6 …] [--snapshot] [--floor]`, plus
 `pat-apply | pat-del | eval [--apply] | arm [--dry] | disarm`.
+
+---
+
+## Same-address arbitration (claims)
+
+For a host that must keep **one identity on either medium** — a DHCP reservation held
+for *both* its MACs, so it is the same address on cable or Wi-Fi. `dnsmasq` warns that
+this "will only work reliably if only one of the hardware addresses is active at any
+time and there is no way for dnsmasq to enforce this". netgov is that enforcer: **one
+address, N adapters, exactly one holder**, chosen by priority.
+
+The claim lives **on a pattern**, because address identity belongs to a site rather than
+to a box — you may be somewhere with none of your usual routers. It is **inert unless
+that pattern is active**.
+
+Set it in the **pattern builder's `claim` field**, in the same grammar as the CLI so the
+two cannot drift into dialects:
+
+```
+192.168.222.153 enp114s0:100 wlo1:50:CNNet
+   address        wired,      Wi-Fi, only when associated to CNNet
+                  priority100  priority 50
+```
+
+Highest-priority **eligible** adapter wins; eligibility is **carrier + association + the
+gateway answering ARP on that interface** (needs `arping`; absent, that last test fails open).
+Carrier alone is not a health signal — a cable can negotiate 1000/full and still lose most
+frames, and an arbiter trusting carrier would hand the address to it.
+Listing SSIDs on a Wi-Fi claimant matters: an adapter associated to a *different* network
+is not a path to that address. (Pointing one at an upstream WAN SSID would let the arbiter
+move the address somewhere it can never be reached.)
+
+**Two different arm switches, and `arm` is not the one you want here:**
+
+| switch | arms | how |
+|---|---|---|
+| **Arm** button / `netgov arm` | the **pattern** failover loop | button, or `arm`/`disarm` |
+| `/etc/netgov-claim.armed` | the **address arbiter** | `netgov claim arm` / `claim disarm` — **CLI only, there is no dashboard control** |
+
+Arming the loop does **not** arm arbitration. Both boot disarmed, and until the flag
+exists the arbiter only reports what it *would* do (`netgov claim` is always safe to run).
+
+**Safety:** claim-before-release — it only ever *moves* an address, and if no claimant is
+eligible the current holder keeps it, so a box is never left with no address. Hand-over
+sends a gratuitous ARP, because a failover the segment cannot see is not a failover.
+
+> ⚠️ **Gating DHCP is necessary but not sufficient.** A standby holding no lease still
+> answers ARP for the address (Linux `arp_ignore=0`) and still competes to be the reply
+> path. On a host with two NICs on one subnet, also set `arp_ignore=1`/`arp_announce=2`
+> with per-interface source routing, or keep the standby off the segment — then verify
+> from the *segment* that exactly one MAC answers.
 
 ---
 

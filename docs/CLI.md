@@ -27,6 +27,38 @@ netgov uplink define <name> --dev <iface> [--gw <ip>]
 netgov uplink del <name>
 ```
 
+### Who decides the path (2.21+)
+
+Two NetworkManager profile properties decide which adapter actually carries
+traffic. netgov can own them; **both are opt-in, and `reset` restores whatever
+they were before netgov first took them over.**
+
+```
+netgov uplink default-route <name> yes|no|auto
+netgov uplink manage-metrics on|off
+```
+
+`default-route` maps to `ipv4.never-default` — whether this uplink may carry the
+default route **at all**. A `never-default` profile silently overrules
+`netgov default set --v4 <that uplink>`, which is why the property is here rather
+than left invisible.
+
+| value | meaning |
+|---|---|
+| `yes` | may carry the default route (`ipv4.never-default no`) |
+| `no` | may **not** — e.g. a cable to a router you do not want capturing your egress |
+| `auto` | **netgov does not hold the property**; NetworkManager keeps whatever it has. The default. |
+
+`manage-metrics on` derives `ipv4.route-metric` from **claim priority**, so the
+adapter your claim says is preferred is also the one the host speaks from. Without
+it, an arbiter can hold an address on one adapter while every packet leaves on
+another — true, and not what the verdict is read as.
+
+**Nothing is written until `netgov apply`.** Run `netgov plan` first: the NM half is
+printed separately, with the reason beside each change. `netgov claim status` reports
+whether **netgov or NetworkManager** currently governs the path — the version tells
+you the capability is installed, not that it governs anything.
+
 ## Rules & default
 
 ```
@@ -75,6 +107,80 @@ netgov disarm               # stop it
 and whose SSID trigger (if any) is in range, then whose default validates internet
 (poll up to ~45 s, debounced) — else the always-reachable `floor`. Watch it with
 `journalctl -u netgov-roled -f`.
+
+## Same-address arbitration (`claim`)
+
+One address, several adapters, **exactly one holder** — for a host that must keep one
+identity whether it is on cable or Wi-Fi (a static DHCP reservation reserved for BOTH
+of its MACs). The claim is a property **of a pattern**, because address identity belongs
+to a site, not to a box: it is inert unless that pattern is the active one.
+
+```
+netgov claim                                  # show the claim on the active pattern + who holds it
+netgov claim set <pattern> <address> <dev:prio[:ssid,ssid]>…
+netgov claim clear <pattern>
+```
+
+```
+netgov claim set LH 192.168.222.153 enp114s0:100 wlo1:50:CNNet
+```
+
+Highest-priority **eligible** adapter wins. Eligibility is **carrier + association +
+gateway-answers-ARP-on-that-interface** (never NetworkManager's connectivity verdict — that
+is an input downstream of the arbiter's own output; an ARP exchange is a measurement taken on
+the interface itself). A Wi-Fi claimant may list the SSIDs on which it is eligible: an adapter
+associated to some *other* network is not a path to that address and is skipped.
+
+**Two separate arm switches — do not confuse them:**
+
+| switch | what it arms | how |
+|---|---|---|
+| `netgov arm` | the **pattern** failover loop (`netgov-roled.service`) | `arm` / `disarm` |
+| `/etc/netgov-claim.armed` | the **address arbiter** | `netgov claim arm` / `claim disarm` |
+
+`netgov arm` does **not** arm arbitration, and the arbiter file does not start the loop.
+Both boot **disarmed**. Until the flag exists the arbiter only ever reports what it *would*
+do — `netgov claim` is safe to run at any time.
+
+**What enforces it (2.7+):** the NetworkManager dispatcher hook runs `claim apply` on link
+**up/down** — the carrier event is the one that changes claimant eligibility. Before 2.7
+arbitration ran only when a *pattern* was activated, which is the wrong trigger: a cable dying
+does not change which pattern is satisfiable, so an armed arbiter was never consulted on the
+event it exists for.
+
+> ⚠️ **Upgrading the binary is not enough — re-run `netgov install`** on each host. The hook on
+> disk dates from whenever it was last installed, so a host with an older hook stays armed but
+> unenforcing. Check: `grep -c claim /etc/NetworkManager/dispatcher.d/90-netgov`.
+
+**Safety rules it obeys:** claim-before-release (it only ever MOVES an address; if no
+claimant is eligible the current holder KEEPS it, so the box is never left with none) and
+a gratuitous ARP on hand-over, because a failover the segment cannot see is not a failover.
+
+**Eligibility also requires the gateway to answer ARP on that interface** (needs `arping`;
+absent, the probe fails open and eligibility is carrier+association only). Carrier is not a
+health signal: a cable can negotiate 1000/full and still lose most frames, and an arbiter
+trusting carrier would hand the address to it. Note the two different fail directions — a
+gateway that does not answer fails **closed** (ineligible), while a missing probe fails
+**open** (losing the ability to test a leg is not evidence against it).
+
+**Claiming on a server that wants no egress policy?** Put the claim on the **floor**: it is
+always satisfiable, so the arbitration is never inert. Declare the floor explicitly first —
+an auto-created floor carries `v6=block`, which is leak-protection for a travelling laptop
+and wrong for a server:
+
+```
+netgov pat-set floor 0 --floor --v4 direct --v6 direct
+netgov claim set floor 192.168.222.186 eno1:100 wlp0s20f3:50:CNNet
+```
+
+`direct` normalises to "no default pinned", so declaring this changes no routing. No `init`
+is needed — a claim references DEVICES, not uplinks.
+
+> ⚠️ **Gating DHCP is necessary but not sufficient.** A standby that holds no lease still
+> answers ARP for the address (Linux `arp_ignore=0`: any interface answers for any local
+> address) and still competes to be the reply path. On a host with two NICs on one subnet,
+> also set `arp_ignore=1` + `arp_announce=2` with per-interface source routing, or keep the
+> standby off the segment. Verify from the SEGMENT that exactly one MAC answers.
 
 ## Links
 
