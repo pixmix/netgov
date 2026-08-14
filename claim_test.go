@@ -174,3 +174,131 @@ func TestClaimNeedsAttention_IsAGateNotAVerdict(t *testing.T) {
 		t.Fatalf("an absent device must not win on the pre-check's say-so; got winner %q", v.Winner)
 	}
 }
+
+// Identity-MAC failover. The ORDER is the safety property: two NICs wearing one MAC on one segment
+// makes the bridge learn it on two ports and flap, which corrupts the segment's view rather than
+// just ours. You cannot check that by running the tool on a healthy box — it never enters the state.
+
+func macMaps() (perm, cur map[string]string) {
+	return map[string]string{"eth0": "48:21:0b:6e:06:85", "wlan0": "98:bd:80:ec:68:cd"},
+		map[string]string{"eth0": "48:21:0b:6e:06:85", "wlan0": "98:bd:80:ec:68:cd"}
+}
+
+func idClaim() *Claim {
+	return &Claim{Address: "192.168.222.153", IdentityMAC: "48:21:0b:6e:06:85",
+		Claimants: []Claimant{{Dev: "eth0", Priority: 100}, {Dev: "wlan0", Priority: 50}}}
+}
+
+// Steady state: the wired leg's PERMANENT mac is the identity and it already wears it. No ops.
+func TestClaimMACPlan_NoOpWhenWinnerAlreadyWearsIt(t *testing.T) {
+	perm, cur := macMaps()
+	if ops := claimMACPlan(idClaim(), "eth0", perm, cur); len(ops) != 0 {
+		t.Fatalf("steady state must produce no ops; got %+v", ops)
+	}
+}
+
+// Failover to wifi: wifi must ASSUME the identity, and since eth0 still wears it, eth0 must give
+// it up FIRST. Overlap is the fault this ordering exists to prevent.
+func TestClaimMACPlan_LoserReleasesBeforeWinnerClaims(t *testing.T) {
+	perm, cur := macMaps()
+	ops := claimMACPlan(idClaim(), "wlan0", perm, cur)
+	if len(ops) != 2 {
+		t.Fatalf("want release-then-claim (2 ops); got %+v", ops)
+	}
+	// The loser's PERMANENT mac IS the identity, so clearing would not release it — it must PARK.
+	// This assertion is the bug the operator caught: the original said Set == "".
+	if ops[0].Dev != "eth0" || ops[0].Set != "4a:21:0b:6e:06:85" {
+		t.Errorf("the FIRST op must PARK the loser off the identity (perm==identity, so clearing is a no-op); got %+v", ops[0])
+	}
+	if ops[1].Dev != "wlan0" || ops[1].Set != "48:21:0b:6e:06:85" {
+		t.Errorf("the SECOND op must be the winner assuming it; got %+v", ops[1])
+	}
+}
+
+// Failing back: wifi currently wears it, eth0 wins. eth0's PERMANENT mac is the identity, so the
+// clone must be CLEARED rather than pinned — a profile should carry no override it does not need.
+func TestClaimMACPlan_WinnerWithPermanentIdentityClearsRatherThanPins(t *testing.T) {
+	perm, cur := macMaps()
+	cur["wlan0"] = "48:21:0b:6e:06:85" // wifi is currently the identity
+	cur["eth0"] = "48:21:0b:6e:06:85"  // and eth0 still has its permanent one
+	ops := claimMACPlan(idClaim(), "eth0", perm, cur)
+	if len(ops) != 1 || ops[0].Dev != "wlan0" || ops[0].Set != "" {
+		t.Fatalf("want exactly one op: wlan0 releases; got %+v", ops)
+	}
+}
+
+// No identity MAC declared = the old lease-arbitration path. Must produce nothing rather than
+// silently doing half of a mechanism.
+func TestClaimMACPlan_InertWithoutAnIdentityMAC(t *testing.T) {
+	cl := idClaim()
+	cl.IdentityMAC = ""
+	perm, cur := macMaps()
+	if ops := claimMACPlan(cl, "wlan0", perm, cur); ops != nil {
+		t.Fatalf("no identity MAC must mean no ops; got %+v", ops)
+	}
+}
+
+func TestParseClaimForm_IdentityMAC(t *testing.T) {
+	cl, err := parseClaimForm("192.168.222.153 identity=48:21:0B:6E:06:85 enp114s0:100 wlo1:50:CNNet")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cl.IdentityMAC != "48:21:0b:6e:06:85" {
+		t.Errorf("identity MAC must be parsed and lowercased; got %q", cl.IdentityMAC)
+	}
+	if len(cl.Claimants) != 2 {
+		t.Errorf("identity= must not be consumed as a claimant; got %d claimants", len(cl.Claimants))
+	}
+	if got := claimFormString(cl); !contains(got, "identity=48:21:0b:6e:06:85") {
+		t.Errorf("must round-trip through the form string; got %q", got)
+	}
+	if _, err := parseClaimForm("192.168.222.153 identity=nonsense enp114s0:100"); err == nil {
+		t.Error("a malformed MAC must be rejected, not silently ignored")
+	}
+}
+
+// The collision the parked MAC exists to prevent, stated directly: after ANY plan, no two adapters
+// may end up on the same MAC. This is the property that actually matters, and the original
+// ordering test passed while violating it.
+func TestClaimMACPlan_NeverLeavesTwoAdaptersOnOneMAC(t *testing.T) {
+	for _, winner := range []string{"eth0", "wlan0"} {
+		perm, cur := macMaps()
+		if winner == "eth0" {
+			cur["wlan0"] = "48:21:0b:6e:06:85" // failback: wifi currently holds the identity
+		}
+		final := map[string]string{}
+		for d, v := range cur {
+			final[d] = v
+		}
+		for _, o := range claimMACPlan(idClaim(), winner, perm, cur) {
+			if o.Set == "" {
+				final[o.Dev] = perm[o.Dev]
+			} else {
+				final[o.Dev] = o.Set
+			}
+		}
+		seen := map[string]string{}
+		for d, m := range final {
+			if prev, dup := seen[m]; dup {
+				t.Fatalf("winner=%s left %s and %s both on %s", winner, prev, d, m)
+			}
+			seen[m] = d
+		}
+		if final[winner] != "48:21:0b:6e:06:85" {
+			t.Errorf("winner=%s must end up on the identity; got %s", winner, final[winner])
+		}
+	}
+}
+
+func TestParkedMAC_SetsLocallyAdministeredBit(t *testing.T) {
+	if got := parkedMAC("48:21:0b:6e:06:85"); got != "4a:21:0b:6e:06:85" {
+		t.Errorf("parkedMAC = %q, want 4a:21:0b:6e:06:85 (0x48|0x02 = 0x4a)", got)
+	}
+	// Already locally administered: must stay put rather than drift on every call.
+	if got := parkedMAC("4a:21:0b:6e:06:85"); got != "4a:21:0b:6e:06:85" {
+		t.Errorf("must be idempotent; got %q", got)
+	}
+	if got := parkedMAC("nonsense"); got != "" {
+		t.Errorf("unparseable input must yield empty, not a bogus MAC; got %q", got)
+	}
+}

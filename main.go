@@ -182,6 +182,16 @@ import (
 // verified the file (`netgov --version`) and not the running thing. /proc/self/exe carries
 // " (deleted)" once the inode is unlinked, which is the cause rather than a proxy for it.
 //
+// 2.27 moves the MAC instead of arbitrating the lease — the operator's design, and it removes the
+// root cause rather than managing it. dnsmasq cannot enforce "only one of these MACs is active";
+// a HOST can trivially enforce "only one of my NICs wears this MAC". So the router reserves the
+// address to ONE MAC, every adapter keeps its own reservation, and failover moves the identity MAC
+// via NM's cloned-mac-address. Consequences: the self-ACD DHCPDECLINE cannot happen (no adapter is
+// ever offered another's address), and NO ADAPTER IS EVER TAKEN DOWN, which retires the bug where
+// releasing a loser left a standby that NetworkManager would not autoconnect back. Ordering flips
+// to release-before-claim, legal only because each leg keeps its own address. Gated by the arm
+// flag: arming means "you may move the identity".
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -193,7 +203,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.26"
+const artefactVersion = "netgov/2.27"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

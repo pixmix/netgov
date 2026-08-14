@@ -54,6 +54,12 @@ type Claimant struct {
 type Claim struct {
 	Address   string     `json:"address"`
 	Claimants []Claimant `json:"claimants"`
+
+	// IdentityMAC turns the whole mechanism inside out, and it is the operator's design
+	// (2026-08-14). Set it and the address is no longer arbitrated by DHCP at all: the router
+	// reserves the address to ONE MAC, each adapter keeps its OWN reservation, and failover moves
+	// the *MAC* to whichever adapter should currently be the identity. See claimMACPlan.
+	IdentityMAC string `json:"identity_mac,omitempty"`
 }
 
 // claimArmedFlag mirrors the pw-failover convention: presence of the file = armed, and removing
@@ -412,6 +418,146 @@ func refCIDR(holder, ref string) string {
 		}
 	}
 	return ref + "/24"
+}
+
+// ---- identity-MAC failover: move the MAC, not the lease ----
+//
+// THE OPERATOR'S IDEA, and it is a better architecture rather than a trick (2026-08-14).
+//
+// dnsmasq(8) states the precondition for a multi-MAC reservation and then says it cannot police
+// it: "only one of the hardware addresses is active at any time and there is no way for dnsmasq to
+// enforce this." EVERY fault this file has chased descends from that one unenforceable sentence:
+//
+//   - the wifi leg is offered the shared address on each reassociation, its own RFC 5227 conflict
+//     detection finds the address answered by THIS HOST's other interface (arp_ignore=0), it
+//     DECLINEs, and dnsmasq benches the reservation for ten minutes — during which NEITHER leg can
+//     hold it;
+//   - and when the wifi leg briefly does hold it, the arbiter releases it with `nmcli connection
+//     down`, which NetworkManager will not autoconnect back. The standby stays dead. Invariant 1
+//     was destroying the very leg it existed to preserve. Measured: 19 minutes, twice over.
+//
+// The fix inverts what is arbitrated. THE ROUTER RESERVES THE ADDRESS TO ONE MAC, and each adapter
+// additionally holds its own reservation, so:
+//
+//	48:21:0b:6e:06:85 (wired) -> 192.168.222.153     the IDENTITY
+//	98:bd:80:ec:68:cd (wifi)  -> 192.168.222.154     always reachable, never contended
+//
+// Failover then sets the winner's `cloned-mac-address` to the identity MAC. A host CAN enforce
+// "only one of my NICs wears this MAC" — it is local config with a single authority — which is
+// exactly the invariant dnsmasq cannot enforce remotely. An unenforceable distributed precondition
+// becomes an enforceable local one.
+//
+// TWO CONSEQUENCES WORTH STATING, because they reverse earlier rules in this file:
+//
+//  1. RELEASE BEFORE CLAIM, here. Two NICs wearing one MAC on one segment makes the bridge learn
+//     it on two ports and flap — corrupting the SEGMENT's view, which is worse than a gap that
+//     only affects us. So the loser gives the MAC back FIRST. That is safe now, and only now,
+//     because the standby keeps its own reservation: invariant 3 forbade release-before-claim to
+//     avoid de-addressing a box with no console, and with .154 permanently present the box is
+//     never without an address. The operator's second reservation is what dissolves the
+//     constraint, and it is the part of his design that makes the rest legal.
+//  2. NOBODY IS EVER TAKEN DOWN. Losers keep their profile, their own address and their
+//     association; they simply stop wearing the identity. The standby-death bug cannot recur.
+//
+// Gated by the arm flag, per the operator: arming means "you may move the identity".
+func devPermMAC(dev string) string {
+	out, err := run("nmcli", "-g", "GENERAL.PERM-HWADDR", "device", "show", dev)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(out))
+}
+
+func devCurrentMAC(dev string) string {
+	b, err := os.ReadFile("/sys/class/net/" + dev + "/address")
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(string(b)))
+}
+
+// parkedMAC derives an address for an adapter that must stop wearing the identity but must stay
+// up: its own permanent MAC with the LOCALLY-ADMINISTERED bit set (0x02 in the first octet).
+//
+// That bit is precisely what distinguishes a locally-assigned address from a manufacturer-assigned
+// one, so the result cannot collide with any factory MAC on the segment — a stronger guarantee
+// than incrementing an octet, which could in principle land on a real neighbour. Deterministic and
+// stable, so an adapter parks on the same address every time and the router's leases stay legible.
+func parkedMAC(perm string) string {
+	var b []byte
+	if m, err := net.ParseMAC(perm); err == nil {
+		b = []byte(m)
+	}
+	if len(b) != 6 {
+		return ""
+	}
+	b[0] |= 0x02
+	out := make([]string, 6)
+	for i, x := range b {
+		out[i] = fmt.Sprintf("%02x", x)
+	}
+	return strings.Join(out, ":")
+}
+
+// macOp is one adapter's identity change, with the reason attached so the plan explains itself.
+type macOp struct {
+	Dev     string
+	Profile string
+	Set     string // cloned-mac value to write ("" = clear, i.e. use the permanent MAC)
+	Why     string
+}
+
+// claimMACPlan returns the ops needed so that exactly `winner` wears IdentityMAC, LOSERS FIRST.
+// Pure: it takes the observed MACs, so the ordering rule can be tested without two NICs.
+func claimMACPlan(cl *Claim, winner string, perm, cur map[string]string) []macOp {
+	if cl.IdentityMAC == "" || winner == "" {
+		return nil
+	}
+	id := strings.ToLower(cl.IdentityMAC)
+	var ops []macOp
+
+	// 1. Losers give it back FIRST — never overlap two NICs on one MAC.
+	//
+	// AND THE LOSER MUST END UP NOT WEARING IT, which is not the same as "clear the override".
+	// The operator caught this before it shipped: the WIRED NIC's PERMANENT MAC *is* the identity
+	// here, so clearing its clone leaves it wearing the identity exactly as before — and the winner
+	// would then assume a MAC its predecessor never gave up. Two NICs, one MAC, one segment: the
+	// bridge learns it on two ports and flaps, corrupting the SEGMENT's view rather than just ours.
+	// The test that "proved" the ordering asserted this wrong behaviour, which is a good reminder
+	// that a test only checks the property you thought to state.
+	//
+	// So: clear when clearing is enough, and PARK otherwise. Parking sets the locally-administered
+	// bit on the adapter's own permanent MAC (48:21:… -> 4a:21:…), which is the standard derivation
+	// for an address guaranteed not to collide with any factory-assigned one, is deterministic and
+	// stable per adapter, and — the operator's point — **keeps the NIC UP**. Taking an interface
+	// down to resolve a MAC conflict is a bigger hammer than the problem; wearing a different MAC
+	// costs that leg only its DHCP reservation, and it lands on a pool address still reachable.
+	for _, c := range cl.Claimants {
+		if c.Dev == winner || cur[c.Dev] != id {
+			continue
+		}
+		if perm[c.Dev] != "" && perm[c.Dev] != id {
+			ops = append(ops, macOp{Dev: c.Dev, Set: "",
+				Why: c.Dev + " releases the identity MAC (back to its permanent " + perm[c.Dev] + ", its own reservation)"})
+			continue
+		}
+		parked := parkedMAC(perm[c.Dev])
+		ops = append(ops, macOp{Dev: c.Dev, Set: parked,
+			Why: c.Dev + " PARKS on " + parked + " — its permanent MAC is the identity, so clearing would not release it"})
+	}
+	// 2. Then the winner takes it.
+	if cur[winner] != id {
+		set := id
+		why := winner + " assumes the identity MAC " + id
+		if perm[winner] == id {
+			// Its own permanent MAC IS the identity: clear the clone rather than pinning it, so
+			// the profile carries no override it does not need.
+			set = ""
+			why = winner + " returns to its permanent MAC, which IS the identity " + id
+		}
+		ops = append(ops, macOp{Dev: winner, Set: set, Why: why})
+	}
+	return ops
 }
 
 // claimNeedsAttention is the LIVENESS pre-check: cheap, probe-free, and the answer to the gap
@@ -798,6 +944,33 @@ func claimReconcile(cl *Claim, dry bool) []string {
 		return log
 	}
 
+	// IDENTITY-MAC MODE (2.27) — preferred when the claim declares one. Moves the MAC rather than
+	// arbitrating the lease, so no adapter is ever taken down and no adapter ever contends for the
+	// address. See claimMACPlan for why this is the better mechanism.
+	if cl.IdentityMAC != "" {
+		perm, cur := map[string]string{}, map[string]string{}
+		for _, c := range cl.Claimants {
+			perm[c.Dev], cur[c.Dev] = devPermMAC(c.Dev), devCurrentMAC(c.Dev)
+		}
+		ops := claimMACPlan(cl, v.Winner, perm, cur)
+		if len(ops) == 0 {
+			log = append(log, "OK: "+v.Winner+" already wears the identity MAC "+cl.IdentityMAC+
+				"; every other claimant is on its own address")
+			return log
+		}
+		for _, o := range ops {
+			log = append(log, "ACTION: "+o.Why)
+		}
+		if dry {
+			return append(log, "DRY-RUN: nothing applied")
+		}
+		if recent, left := claimFailedRecently(cl.Address); recent {
+			return append(log, "SUPPRESSED: an attempt on "+cl.Address+" failed recently; not retrying for "+
+				strconv.Itoa(left)+"s. Clear "+claimFailFile+" to retry sooner.")
+		}
+		return append(log, applyMACOps(cl, ops)...)
+	}
+
 	var losers []string
 	for _, h := range v.Holders {
 		if h != v.Winner {
@@ -1012,6 +1185,16 @@ func parseClaimForm(spec string) (*Claim, error) {
 	cl := &Claim{Address: f[0]}
 	seen := map[string]bool{}
 	for _, s := range f[1:] {
+		// identity=<mac> declares the MAC that FOLLOWS the address between adapters (2.27).
+		// `=` rather than `:` because a MAC is full of colons and the claimant grammar splits on them.
+		if strings.HasPrefix(strings.ToLower(s), "identity=") {
+			m := strings.ToLower(strings.TrimSpace(s[len("identity="):]))
+			if _, err := net.ParseMAC(m); err != nil {
+				return nil, fmt.Errorf("claim: %q is not a MAC address", m)
+			}
+			cl.IdentityMAC = m
+			continue
+		}
 		c, err := parseClaimant(s)
 		if err != nil {
 			return nil, err
@@ -1032,6 +1215,9 @@ func claimFormString(cl *Claim) string {
 		return ""
 	}
 	out := cl.Address
+	if cl.IdentityMAC != "" {
+		out += " identity=" + cl.IdentityMAC
+	}
 	for _, c := range cl.Claimants {
 		out += " " + c.Dev + ":" + strconv.Itoa(c.Priority)
 		if len(c.SSIDs) > 0 {
@@ -1210,6 +1396,18 @@ func cmdClaim(st *State, args []string) {
 		// Liveness: arbitration on carrier edges alone leaves a stranded address stranded when the
 		// network goes quiet. Say whether the watchdog that covers that is actually running. (2.25)
 		fmt.Println(" " + claimWatchLine())
+		if cl.IdentityMAC != "" {
+			for _, c := range cl.Claimants {
+				mark := "  "
+				if devCurrentMAC(c.Dev) == strings.ToLower(cl.IdentityMAC) {
+					mark = "->"
+				}
+				fmt.Printf(" identity: %s %-14s mac=%s perm=%s\n", mark, c.Dev, dash(devCurrentMAC(c.Dev)), dash(devPermMAC(c.Dev)))
+			}
+		} else {
+			fmt.Println(" identity: no identity MAC declared — falling back to lease arbitration," +
+				" which takes a losing adapter DOWN and NetworkManager will not autoconnect it back")
+		}
 	case "apply":
 		if !claimArmed() {
 			fmt.Println(" refusing to apply: not armed (netgov claim arm) — showing the plan instead")
@@ -1250,4 +1448,70 @@ func claimWatchLine() string {
 		return "liveness: claim-watch timer NOT INSTALLED — arbitration fires on carrier events ONLY," +
 			" so a failed claim on a quiet network stays stranded (`netgov install` to fix)"
 	}
+}
+
+// applyMACOps executes an identity-MAC plan IN ORDER (losers release before the winner claims),
+// writing NetworkManager's cloned-mac-address rather than raw `ip link` so the change is
+// declarative, survives NM reasserting itself, and is restored by `netgov reset`.
+//
+// Each op needs the profile cycled for the MAC to take effect — a MAC cannot change on a live
+// interface. That is a real gap on the leg being changed, which is precisely why the loser goes
+// first and why every claimant keeps its own reservation: the box is never without an address.
+func applyMACOps(cl *Claim, ops []macOp) []string {
+	var log []string
+	for _, o := range ops {
+		prof := devProfile(o.Dev)
+		if prof == "" {
+			log = append(log, "WARN: no active profile on "+o.Dev+" — skipped ("+o.Why+")")
+			continue
+		}
+		key := "802-3-ethernet.cloned-mac-address"
+		if devIsWireless(o.Dev) {
+			key = "802-11-wireless.cloned-mac-address"
+		}
+		// Record the pre-netgov value ONCE so `reset` restores it (nmprops.go rules apply).
+		if st := loadState(statePath()); st != nil {
+			if curv, ok := nmGet(prof, key); ok && nmRecordOriginal(st, prof, key, curv) {
+				saveStateKeepOwner(st, statePath())
+			}
+		}
+		if err := runPriv("nmcli", "connection", "modify", prof, key, o.Set); err != nil {
+			log = append(log, "ABORT: could not set "+key+" on "+prof+" ("+err.Error()+") — nothing further attempted")
+			_ = recordClaimFailure(cl.Address)
+			return log
+		}
+		// `connection up` re-activates in place; the MAC is applied on activation.
+		if err := runPriv("nmcli", "connection", "up", prof); err != nil {
+			log = append(log, "WARN: "+prof+" did not come back up after the MAC change ("+err.Error()+")")
+			_ = recordClaimFailure(cl.Address)
+			return log
+		}
+		log = append(log, "applied: "+o.Why)
+	}
+
+	// Verify the EFFECT, not the exit codes. Seven nmcli commands returning 0 is what "applied
+	// (11 cmds, 0 errors)" looked like on the night this file learned not to trust them.
+	for i := 0; i < claimAcquireTimeout; i++ {
+		if devCurrentMAC(macWinner(ops)) == strings.ToLower(cl.IdentityMAC) && devHoldsAddr(macWinner(ops), cl.Address) {
+			clearClaimFailure()
+			// Invariant 4: the segment must be TOLD, not assumed — and after a MAC move the
+			// peers' caches are wrong in the most confusing way possible, mapping the identity
+			// address to an adapter that no longer wears it.
+			_ = runPriv("arping", "-U", "-c", "3", "-I", macWinner(ops), cl.Address)
+			return append(log, "APPLIED: "+macWinner(ops)+" wears "+cl.IdentityMAC+" and holds "+cl.Address)
+		}
+		time.Sleep(time.Second)
+	}
+	_ = recordClaimFailure(cl.Address)
+	return append(log, "FAILED: "+macWinner(ops)+" did not end up holding "+cl.Address+" within "+
+		strconv.Itoa(claimAcquireTimeout)+"s. Nothing was taken down and every claimant keeps its own address, "+
+		"so the box remains reachable — check the router reserves "+cl.Address+" to "+cl.IdentityMAC+".")
+}
+
+// macWinner returns the device the plan ends on — the one that takes the identity.
+func macWinner(ops []macOp) string {
+	if len(ops) == 0 {
+		return ""
+	}
+	return ops[len(ops)-1].Dev
 }
