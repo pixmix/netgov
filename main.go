@@ -264,6 +264,28 @@ import (
 // PRINTED WITH A MEASUREMENT INHERITS THE MEASUREMENT'S AUTHORITY. If the evidence does not
 // distinguish two causes, the output must say so rather than name the more alarming one.
 //
+// 2.32 closes the oldest open bug in this file — the v6 "no internet" badge on a working uplink,
+// found 2026-07-05 and left pending for five weeks. The reason it survived is the point: this box
+// has had no global IPv6 the whole time, so nothing available here could reproduce it. It was seen
+// once, on a German Vodafone line, and then became invisible to every observation on the machine
+// where the fix would be written. That is what tests are for, and there were none.
+//
+// CAUSE. IPv6 privacy extensions (RFC 4941) put a STABLE address and a rotating TEMPORARY address
+// on the same /64, and RFC 6724 tells applications to prefer the temporary one as a source. netgov
+// pinned its source-return rule to ONE address — whichever devSrc saw first — so traffic sourced
+// from the other matched no rule and fell through to the priority-29000 blackhole that implements
+// v6=block. The badge was the mild symptom; the same miss applies to real traffic.
+//
+// Note the fix that would have been WRONG. Making devSrc prefer the stable address (the obvious
+// one-liner, and what the original note proposed first) fixes the PROBE and leaves applications
+// blackholed, because they prefer the temporary address — it would have turned a visible bug into
+// a silent one. The rule has to cover the PREFIX, which is what v6SrcPrefixes does; preferring the
+// stable address is worth doing too, but for reporting, not for correctness.
+//
+// v4 numbering is deliberately untouched (one rule, priSrcRet+offset): on v4 the address IS the
+// identity, and churning working rules on every host to make the two families look alike would be
+// change for its own sake.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -275,7 +297,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.31"
+const artefactVersion = "netgov/2.32"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -639,6 +661,13 @@ type ipAddr struct {
 		Local     string `json:"local"`
 		Scope     string `json:"scope"`
 		PrefixLen int    `json:"prefixlen"`
+		// IPv6 privacy extensions (RFC 4941). `temporary` is the rotating address the kernel
+		// generates and RFC 6724 tells applications to PREFER as a source; `mngtmpaddr` marks the
+		// stable one that manages them. Both are global and both live on the same prefix, which is
+		// why a from-rule pinned to a single v6 address is a bug — see v6SrcPrefixes.
+		Temporary  bool `json:"temporary"`
+		MngTmpAddr bool `json:"mngtmpaddr"`
+		Deprecated bool `json:"deprecated"`
 	} `json:"addr_info"`
 }
 type ipRoute struct {
@@ -680,22 +709,133 @@ func devSrc(dev, fam string) string {
 	if json.Unmarshal([]byte(out), &addrs) != nil {
 		return ""
 	}
+	return pickSrc(out, fam)
+}
+
+// pickSrc chooses the address to REPORT and to bind probes to. Pure, so the v6 preference below can
+// be asserted without a global v6 prefix to hand — which is exactly why the bug it fixes survived
+// from 2026-07-05: this box has had no global v6 since, so nothing on it could reproduce the case.
+//
+// For v6 it prefers a STABLE address over a `temporary` one. Privacy extensions (RFC 4941) rotate
+// the temporary address every few hours, so reporting it in the UI shows a value that is true for
+// an hour, and binding a probe to it makes the probe's meaning expire. The stable address is either
+// the one flagged `mngtmpaddr` or simply any global that is not `temporary`.
+//
+// A `deprecated` address is skipped in both families: it is being retired and may stop working
+// mid-probe, which would read as a link fault.
+func pickSrc(jsonOut, fam string) string {
+	var addrs []ipAddr
+	if json.Unmarshal([]byte(jsonOut), &addrs) != nil {
+		return ""
+	}
 	want := "inet"
 	if fam == "6" {
 		want = "inet6"
 	}
+	var fallback string
 	for _, a := range addrs {
 		for _, ai := range a.AddrInfo {
-			// for v6 prefer a global, non-ULA address (ULA fd00::/8 isn't routable)
-			if ai.Family == want && ai.Scope == "global" {
-				if fam == "6" && strings.HasPrefix(strings.ToLower(ai.Local), "fd") {
-					continue
-				}
-				return ai.Local
+			if ai.Family != want || ai.Scope != "global" || ai.Deprecated {
+				continue
 			}
+			// for v6 prefer a global, non-ULA address (ULA fd00::/8 isn't routable)
+			if fam == "6" && strings.HasPrefix(strings.ToLower(ai.Local), "fd") {
+				continue
+			}
+			if fam == "6" && ai.Temporary {
+				if fallback == "" {
+					fallback = ai.Local // usable, but it will rotate away
+				}
+				continue
+			}
+			return ai.Local
 		}
 	}
-	return ""
+	return fallback
+}
+
+// srcSel is one source-return rule to install: what to match, and at which priority.
+type srcSel struct {
+	From string
+	idx  int
+	v6   bool
+}
+
+// Pri keeps the v4 numbering byte-identical to what shipped before (one rule, priSrcRet+offset) and
+// gives v6 a spaced band so several prefixes on one uplink each get their own priority. Ten slots
+// per uplink over tables 100-198 tops out at 20989, well inside the owned 8000-29999 band.
+func (s srcSel) Pri(table int) int {
+	if !s.v6 {
+		return priSrcRet + table - tableBase
+	}
+	return priSrcRet + (table-tableBase)*10 + s.idx
+}
+
+// srcSelectors returns what this uplink's source-return rules should match on.
+func srcSelectors(dev, fam, src string) []srcSel {
+	if fam != "6" {
+		if src == "" {
+			return nil
+		}
+		return []srcSel{{From: src}}
+	}
+	out, err := run("ip", "-j", "addr", "show", "dev", dev)
+	if err != nil {
+		return []srcSel{{From: src, v6: true}} // cannot enumerate: keep the old single-address rule
+	}
+	pfx := v6SrcPrefixes(out)
+	if len(pfx) == 0 {
+		return []srcSel{{From: src, v6: true}}
+	}
+	var sels []srcSel
+	for i, p := range pfx {
+		if i >= 10 {
+			break // the priority band allots ten slots per uplink; more than that is not a real host
+		}
+		sels = append(sels, srcSel{From: p, idx: i, v6: true})
+	}
+	return sels
+}
+
+// v6SrcPrefixes returns the distinct global prefixes this device can legitimately source traffic
+// from, masked to the network. THIS IS THE FIX for the 2026-07-05 false "no internet" badge.
+//
+// The v4 source-return rule pins one ADDRESS because on v4 the address is the host's identity. On
+// v6 it is not: privacy extensions put a stable address and a rotating temporary address on the
+// same prefix, and RFC 6724 tells applications to prefer the TEMPORARY one for outgoing traffic.
+// So a rule reading `from <one v6 address> table N` matches whichever address netgov happened to
+// see first and silently fails to match the other — and traffic that misses every source rule falls
+// through to the priority-29000 blackhole that implements `v6=block`.
+//
+// The visible symptom was a dashboard badge reading "no internet" on a working v6 uplink, which is
+// the least alarming way this could have presented: the same miss applies to real traffic, not only
+// to the probe. Fixing `devSrc` alone would have been worse than useless — it would have made the
+// probe pass while applications, which prefer the temporary address, kept being blackholed. The
+// rule has to cover the PREFIX.
+func v6SrcPrefixes(jsonOut string) []string {
+	var addrs []ipAddr
+	if json.Unmarshal([]byte(jsonOut), &addrs) != nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, a := range addrs {
+		for _, ai := range a.AddrInfo {
+			if ai.Family != "inet6" || ai.Scope != "global" || ai.PrefixLen == 0 {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(ai.Local), "fd") {
+				continue
+			}
+			_, netw, err := net.ParseCIDR(ai.Local + "/" + itoa(ai.PrefixLen))
+			if err != nil || seen[netw.String()] {
+				continue
+			}
+			seen[netw.String()] = true
+			out = append(out, netw.String())
+		}
+	}
+	return out
 }
 
 func defaultGW(dev, fam string) string {
@@ -921,7 +1061,16 @@ func planFamily(st *State, fam string) (clean, build [][]string) {
 		if gw != "" {
 			build = append(build, ipfam(fam, "route", "add", "default", "via", gw, "dev", u.Dev, "table", itoa(u.Table)))
 		}
-		build = append(build, ipfam(fam, "rule", "add", "from", src, "table", itoa(u.Table), "priority", itoa(priSrcRet+u.Table-tableBase)))
+		// v4 pins the ADDRESS (it is the host's identity there); v6 pins every global PREFIX,
+		// because privacy extensions mean the address the kernel reports and the address an
+		// application actually sources from are routinely different. See v6SrcPrefixes.
+		//
+		// v4 and v6 rules are separate namespaces, so the spaced v6 priorities below cannot collide
+		// with the v4 numbering even where the arithmetic overlaps.
+		for _, sel := range srcSelectors(u.Dev, fam, src) {
+			build = append(build, ipfam(fam, "rule", "add", "from", sel.From, "table", itoa(u.Table),
+				"priority", itoa(sel.Pri(u.Table))))
+		}
 	}
 
 	// local always direct (via main)

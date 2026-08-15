@@ -92,6 +92,21 @@ netgov default clear
 
 RFC1918 / link-local always stays on the main table.
 
+### IPv6 source rules cover the PREFIX, not one address (2.32)
+
+Each uplink gets a source-return rule so replies leave the way they came. On **v4** that pins the
+single address — there, the address is the host's identity. On **v6** it pins every global
+**prefix** on the device, because privacy extensions (RFC 4941) put a stable address and a rotating
+temporary address on the same `/64`, and RFC 6724 tells applications to prefer the *temporary* one.
+
+A rule pinned to one v6 address matches whichever the tool saw first and silently misses the other;
+traffic matching no source rule falls into the `v6=block` blackhole at priority 29000. Before 2.32
+that showed up as a dashboard badge reading **"no internet" on a working IPv6 uplink** — and the
+same miss applied to real traffic, not just the probe.
+
+`netgov status` reports the **stable** v6 address rather than the temporary one, so the value does
+not change under you every few hours.
+
 ## Access points (named library)
 
 Saving **defines** an AP; it does not switch on (so you can define an AP on a radio
