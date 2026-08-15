@@ -19,6 +19,25 @@ State lives in `~/.config/netgov/state.json` (override with `NETGOV_STATE` or
 | `netgov web [--addr 127.0.0.1:8474]` | serve the dashboard (localhost only) |
 | `netgov install` | install the web service, NM re-apply hook, and failover unit |
 
+### Reading `apply`'s output (2.29)
+
+`netgov: applied (14 cmds, 0 errors)` is the summary, but **the count is not the check** —
+`apply` also verifies the *effect* and prints this when it fails:
+
+```
+⚠ uplink cable (v4): table 100 has NO default, but rule `from 192.168.222.153 table 100`
+  is installed — traffic from 192.168.222.153 falls through to main and still works, so
+  nothing looks broken, while every pin routed through this uplink is NOT in effect.
+```
+
+That is the state to know about, because it is invisible from the outside: `apply` flushes each
+uplink's table before rebuilding it and installs the source rule regardless, so a rebuild that
+fails leaves a live rule pointing at an empty table. Connectivity is unaffected — traffic falls
+through to `main` — and only the *policy* is silently gone. Re-run `netgov apply` once the link
+has settled.
+
+`ip route get <dst> from <src>` is the independent check: it should name the uplink's table.
+
 ## Uplinks
 
 ```
