@@ -266,10 +266,22 @@ A correctly-configured identity-MAC host prints **no `⚠` at all**.
 | `COOLDOWN OVERRIDDEN` | a previous attempt failed and left the address held by nobody, so the backoff is being ignored — correct, and the only time it happens |
 | `ABORT: … is NOT on the intended MAC` | a real stop: the MAC could not be verified, so continuing risks two adapters on one MAC |
 
-⚠️ **A parked leg holds a MAC the router has no reservation for**, so it depends on the DHCP server
-handing it a **pool address**. Where the pool is exhausted or absent, the parked leg ends up with no
-address at all and reads `UNCONFIGURED, not lossy` — it will not win the claim back until it is
-addressable again. Check the server has a pool before arming identity-MAC on a box you cannot reach.
+**A parked leg holds a MAC the router has no reservation for**, so it takes a **pool address**, not
+its usual one. Two consequences, both measured on the 2026-08-15 ms-rosy failover:
+
+- The parked leg asks for its old address, is offered a pool address instead, and accepts —
+  `DHCPDISCOVER .186 / DHCPOFFER .247 / DHCPACK .247`. That is the mechanism working: the
+  reservation stays bound to the identity MAC alone.
+- **Activation can outlast `nmcli connection up`.** DHCP completed **107 seconds** after
+  netgov's `connection up` had already returned exit 4. Since 2.30 that is handled by measuring the
+  MAC rather than trusting the exit code — it is why `applied (activation incomplete)` exists.
+- Each park leaves a **pool lease under a MAC no interface wears** for the lease duration (12 h
+  here). Harmless with a large pool; worth knowing if yours is small.
+
+⚠️ **The genuine precondition is that the server has a usable pool at all.** With no pool a parked
+leg gets no address, reads `UNCONFIGURED, not lossy`, and cannot win the claim back. Verify this
+before arming identity-MAC on a box you cannot reach — but note it is a *precondition*, not a
+common failure: on a `/24` with a 150-address pool it will not be your problem.
 
 ## Links
 
