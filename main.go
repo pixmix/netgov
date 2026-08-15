@@ -192,6 +192,19 @@ import (
 // to release-before-claim, legal only because each leg keeps its own address. Gated by the arm
 // flag: arming means "you may move the identity".
 //
+// 2.28 makes the standby report mechanism-aware, because 2.27 turned one of this tool's own rules
+// against it. c-001 found it from the outside: "a standby holding its own address is the entire
+// point of identity-MAC failover, so that line will fire permanently on every correctly-configured
+// box — which trains you to ignore warnings." Under lease arbitration the line was right; under
+// identity-MAC the same observation describes the design. So it is now conditioned on the mechanism
+// and replaced, in identity mode, by the three MAC states that really do break it (collision,
+// identity worn by nobody, a standby on a MAC netgov never sets) plus one — two legs holding the
+// guarded address — that was a fault under BOTH mechanisms and that nothing had ever watched for,
+// since the standby scan excludes the guarded address by construction. The instructive part is that
+// 2.23 wrote "a report that cries wolf on every box teaches operators to skip it" as a test, and
+// four releases later shipped exactly that: the rule was held about the OLD condition and never
+// re-asked of the new one.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -203,7 +216,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.27"
+const artefactVersion = "netgov/2.28"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

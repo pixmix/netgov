@@ -111,19 +111,44 @@ and whose SSID trigger (if any) is in range, then whose default validates intern
 ## Same-address arbitration (`claim`)
 
 One address, several adapters, **exactly one holder** — for a host that must keep one
-identity whether it is on cable or Wi-Fi (a static DHCP reservation reserved for BOTH
-of its MACs). The claim is a property **of a pattern**, because address identity belongs
-to a site, not to a box: it is inert unless that pattern is the active one.
+identity whether it is on cable or Wi-Fi. The claim is a property **of a pattern**, because
+address identity belongs to a site, not to a box: it is inert unless that pattern is the
+active one.
 
 ```
 netgov claim                                  # show the claim on the active pattern + who holds it
-netgov claim set <pattern> <address> <dev:prio[:ssid,ssid]>…
+netgov claim set <pattern> <address> [identity=<mac>] <dev:prio[:ssid,ssid]>…
 netgov claim clear <pattern>
 ```
 
+### Two mechanisms — declare `identity=` and you get the better one (2.27+)
+
+|  | **identity-MAC** (`identity=…`) | **lease arbitration** (no `identity=`) |
+|---|---|---|
+| router side | one reservation **per adapter**, each to its own MAC | **one** reservation listing **all** the host's MACs |
+| failover moves | the **MAC** (NM `cloned-mac-address`) | the **lease** (release / renew) |
+| standby holds | its **own** address, always | nothing, or a pool consolation address |
+| adapter ever downed | **no** | sometimes |
+
 ```
-netgov claim set LH 192.168.222.153 enp114s0:100 wlo1:50:CNNet
+netgov claim set LH 192.168.222.153 identity=48:21:0b:6e:06:85 enp114s0:100 wlo1:50:CNNet
 ```
+
+Prefer identity-MAC. `dnsmasq` documents that a multi-MAC reservation "will only work
+reliably if only one of the hardware addresses is active at any time and there is no way
+for dnsmasq to enforce this" — but a *host* enforces "only one of my NICs wears this MAC"
+trivially. Moving the identity also removes two faults the lease mechanism cannot avoid:
+the standby is never offered an address another adapter already has (so its own RFC 5227
+conflict detection cannot see a sibling answer and `DHCPDECLINE` the reservation into a
+10-minute bench), and no adapter is ever taken down.
+
+A loser whose *permanent* MAC is the identity **parks** on the same address with the
+locally-administered bit set (`48:21:… → 4a:21:…`), so no two adapters ever wear one MAC.
+If the permanent MAC cannot be read (`ethtool -P`), netgov **refuses to plan** rather than
+guess — a swap it cannot undo is worse than no swap.
+
+Lease arbitration remains for claims with no `identity=`, and its rules below still apply
+to those.
 
 Highest-priority **eligible** adapter wins. Eligibility is **carrier + association +
 gateway-answers-ARP-on-that-interface** (never NetworkManager's connectivity verdict — that
@@ -176,11 +201,32 @@ netgov claim set floor 192.168.222.186 eno1:100 wlp0s20f3:50:CNNet
 `direct` normalises to "no default pinned", so declaring this changes no routing. No `init`
 is needed — a claim references DEVICES, not uplinks.
 
-> ⚠️ **Gating DHCP is necessary but not sufficient.** A standby that holds no lease still
-> answers ARP for the address (Linux `arp_ignore=0`: any interface answers for any local
-> address) and still competes to be the reply path. On a host with two NICs on one subnet,
-> also set `arp_ignore=1` + `arp_announce=2` with per-interface source routing, or keep the
-> standby off the segment. Verify from the SEGMENT that exactly one MAC answers.
+> ⚠️ **Lease arbitration only — gating DHCP is necessary but not sufficient.** A standby
+> that holds no lease still answers ARP for the address (Linux `arp_ignore=0`: any interface
+> answers for any local address) and still competes to be the reply path. On a host with two
+> NICs on one subnet, also set `arp_ignore=1` + `arp_announce=2` with per-interface source
+> routing, or keep the standby off the segment. Verify from the SEGMENT that exactly one MAC
+> answers. **Under identity-MAC this does not arise**: the standby is on its own address and
+> its own MAC, so there is no second answer for the guarded address to begin with.
+
+### What `netgov claim` warns about (2.28)
+
+Under **lease arbitration**, a standby holding any address on the guarded subnet is itself
+the finding — it is on the segment.
+
+Under **identity-MAC** that is the design, and saying so on every healthy box would be a
+warning nobody reads. So the report is silent on it and speaks on the states that break the
+mechanism instead:
+
+| line | meaning |
+|---|---|
+| `⚠ SPLIT-BRAIN` | two of this host's legs carry the guarded address at once (a fault under **both** mechanisms) |
+| `⚠ MAC COLLISION` | two adapters wear one MAC — exactly what parked MACs exist to prevent |
+| `⚠ identity MAC … worn by NO claimant` | the router reserves the address to a MAC not present here, so no leg can take it |
+| `⚠ … neither its permanent MAC nor its parked MAC` | a foreign clone or a half-applied swap; failover from it is not predictable |
+| `⚠ HOLDS is not PATH` | the holder is correct and the host talks on the *other* adapter — chosen by route metric, not by the arbiter |
+
+A correctly-configured identity-MAC host prints **no `⚠` at all**.
 
 ## Links
 

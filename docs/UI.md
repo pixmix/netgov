@@ -20,6 +20,11 @@ while you're typing in a field).
 > A `default route` cell set to **auto** means netgov does not hold that property.
 > Metrics stay NetworkManager's until you run `netgov uplink manage-metrics on`.
 > The claim card tells you which of the two is currently governing.
+>
+> **A third since 2.27:** `cloned-mac-address`, written only by a claim that declares
+> an `identity=` MAC and only while the arbiter is armed — that is how failover moves
+> the identity instead of the lease. Restored on reset like the others, and since 2.28
+> netgov will not record one of *its own* MACs as your baseline.
 
 ---
 
@@ -149,11 +154,8 @@ CLI: `netgov pat-set <name> <prio> [--require a,b] [--ssid S --ssid-iface <uplin
 
 ## Same-address arbitration (claims)
 
-For a host that must keep **one identity on either medium** — a DHCP reservation held
-for *both* its MACs, so it is the same address on cable or Wi-Fi. `dnsmasq` warns that
-this "will only work reliably if only one of the hardware addresses is active at any
-time and there is no way for dnsmasq to enforce this". netgov is that enforcer: **one
-address, N adapters, exactly one holder**, chosen by priority.
+For a host that must keep **one identity on either medium** — the same address on cable or
+Wi-Fi: **one address, N adapters, exactly one holder**, chosen by priority.
 
 The claim lives **on a pattern**, because address identity belongs to a site rather than
 to a box — you may be somewhere with none of your usual routers. It is **inert unless
@@ -163,10 +165,21 @@ Set it in the **pattern builder's `claim` field**, in the same grammar as the CL
 two cannot drift into dialects:
 
 ```
-192.168.222.153 enp114s0:100 wlo1:50:CNNet
-   address        wired,      Wi-Fi, only when associated to CNNet
-                  priority100  priority 50
+192.168.222.153 identity=48:21:0b:6e:06:85 enp114s0:100 wlo1:50:CNNet
+   address        the MAC the router reserves   wired,      Wi-Fi, only when
+                  it to — failover MOVES this   priority100  associated to CNNet,
+                                                             priority 50
 ```
+
+**Declaring `identity=` picks the better of two mechanisms (2.27+).** Without it, the router
+holds one reservation listing *all* the host's MACs and failover moves the **lease** —
+which is the case `dnsmasq` itself warns "will only work reliably if only one of the
+hardware addresses is active at any time and there is no way for dnsmasq to enforce this".
+With it, each adapter gets **its own** reservation and failover moves the **MAC**: no
+adapter is ever taken down, and no adapter is ever offered an address a sibling already
+holds — the condition that made a leg's own conflict detection reject the reservation and
+bench it for ten minutes. A loser whose permanent MAC *is* the identity parks on the
+locally-administered variant (`48:21:… → 4a:21:…`), so two adapters never share a MAC.
 
 Highest-priority **eligible** adapter wins; eligibility is **carrier + association + the
 gateway answering ARP on that interface** (needs `arping`; absent, that last test fails open).
@@ -190,19 +203,37 @@ exists the arbiter only reports what it *would* do (`netgov claim` is always saf
 eligible the current holder keeps it, so a box is never left with no address. Hand-over
 sends a gratuitous ARP, because a failover the segment cannot see is not a failover.
 
-> ⚠️ **Gating DHCP is necessary but not sufficient.** A standby holding no lease still
-> answers ARP for the address (Linux `arp_ignore=0`) and still competes to be the reply
-> path. On a host with two NICs on one subnet, also set `arp_ignore=1`/`arp_announce=2`
-> with per-interface source routing, or keep the standby off the segment — then verify
-> from the *segment* that exactly one MAC answers.
+> ⚠️ **Lease arbitration only — gating DHCP is necessary but not sufficient.** A standby
+> holding no lease still answers ARP for the address (Linux `arp_ignore=0`) and still
+> competes to be the reply path. On a host with two NICs on one subnet, also set
+> `arp_ignore=1`/`arp_announce=2` with per-interface source routing, or keep the standby off
+> the segment — then verify from the *segment* that exactly one MAC answers. **Under
+> identity-MAC this does not arise**: the standby is on its own address and its own MAC.
+
+**What the claim panel warns about (2.28).** Under identity-MAC a standby holding its own
+address *is* the design, so it is no longer reported — a line that fires on every healthy
+box teaches you to skip the panel. What is reported instead: `⚠ SPLIT-BRAIN` (two legs on
+the guarded address), `⚠ MAC COLLISION` (two adapters on one MAC), `⚠ identity MAC worn by
+NO claimant`, a leg on a MAC netgov never set, and `⚠ HOLDS is not PATH`. A healthy
+identity-MAC host shows **no ⚠ at all**.
 
 ---
 
 ## Restore
 
 **⟲ Restore to NetworkManager** (`netgov reset`) flushes **all** netgov rules and
-tables — your OS/NM baseline reappears intact. netgov never edited NM itself, so
-there's nothing else to undo. (Disarm first if armed.)
+tables, **and puts back every NetworkManager property netgov took over** — it is a
+save-and-restore, not just a flush. (Disarm first if armed.)
+
+netgov edits NM in exactly two places, both opt-in and both recorded with their original
+value before the first write:
+
+| property | taken over by | restored by `reset` |
+|---|---|---|
+| `ipv4.never-default`, `ipv4.route-metric` | `uplink manage-metrics on` (2.21) | ✔ |
+| `802-3-ethernet` / `802-11-wireless.cloned-mac-address` | an **armed** claim with `identity=` (2.27) | ✔ |
+
+Everything else about your profiles is untouched.
 
 ## Log
 

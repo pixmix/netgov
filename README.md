@@ -50,8 +50,8 @@ The **routing engine** only writes `ip rule`s in the priority band **8000–2999
 and routes in tables **100–199**, and never edits the main table. `netgov reset`
 flushes exactly that owned band and the OS networking baseline reappears.
 
-**Two NetworkManager profile properties are the exception, and they are opt-in**
-(since 2.21). `ipv4.never-default` — whether an uplink may carry the default route
+**Three NetworkManager profile properties are the exception, and every one is
+opt-in.** `ipv4.never-default` — whether an uplink may carry the default route
 at all — and `ipv4.route-metric`, which decides *which adapter actually carries
 traffic*. netgov used to leave both alone, which meant it could accept
 `default set --v4 cable`, report it applied, and be silently overruled by the
@@ -66,6 +66,13 @@ no-op**: the value each property had *before* netgov first took it over is recor
   binary changes nothing on its own: the apply path runs from the NetworkManager
   dispatcher on carrier events, so enabling by default would hand netgov two host
   properties at the next link flap on a box whose operator never asked.
+- `cloned-mac-address` (2.27) is written only by a claim that declares `identity=`,
+  and only while the arbiter is **armed** — that is what makes failover move the
+  *MAC* instead of the *lease*. It is also restored on reset, and since 2.28 netgov
+  refuses to record one of **its own** MACs as your baseline: a restore that
+  installs a parked MAC onto the leg the router reserves your address to would be
+  worse than no restore at all, and it would only ever misfire while you were
+  already recovering from something else.
 - `netgov plan` prints the NM half separately, with the reason beside each change,
   before anything is written. `netgov claim status` reports whether **netgov or
   NetworkManager** currently governs the path — a version tells you the capability

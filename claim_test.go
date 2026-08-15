@@ -105,6 +105,9 @@ func TestPathLines_UnmeasurableIsNotAFinding(t *testing.T) {
 // The standby-on-segment condition is reportable even when the routes happen to fall the right
 // way — being on the segment is the hazard, not the current metric. This one would never be
 // caught by running the tool, because arranging it means giving a standby its own lease.
+//
+// 2.28: this is now specifically the LEASE-ARBITRATION case (no identity MAC declared), where it
+// remains true. The identity-MAC case is the two tests further down, and it is the opposite.
 func TestPathLines_StandbyOnGuardedSubnetIsReportedEvenWhenPathIsCorrect(t *testing.T) {
 	got := pathLines("192.168.222.153", "enp114s0", pathObs{
 		Gateway: "192.168.222.1",
@@ -117,6 +120,105 @@ func TestPathLines_StandbyOnGuardedSubnetIsReportedEvenWhenPathIsCorrect(t *test
 	}
 	if has(t, got, "HOLDS is not PATH") {
 		t.Errorf("that is a separate condition and must not be conflated with a path split; got %q", got)
+	}
+}
+
+// c-001's finding, 2026-08-14: under identity-MAC a standby holding its own address IS the design,
+// so the warning above would fire forever on every correctly-configured box. This is the test that
+// the fix is a fix — the healthy identity-mode box must produce NO warning at all. It cannot be
+// verified by running the tool, because on a healthy box "no output" is also what a broken check
+// produces.
+func TestPathLines_IdentityModeDoesNotWarnAboutTheDesign(t *testing.T) {
+	got := pathLines("192.168.222.153", "enp114s0", pathObs{
+		Gateway:  "192.168.222.1",
+		OnDev:    "enp114s0",
+		OnSrc:    "192.168.222.153",
+		Extra:    []string{"wlo1 192.168.222.154"}, // the standby's OWN reservation: intended
+		Identity: "48:21:0b:6e:06:85",
+		Holders:  []string{"enp114s0"},
+		MACs: []macFact{
+			{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
+			{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: "98:bd:80:ec:68:cd"},
+		},
+	})
+	for _, l := range got {
+		if contains(l, "⚠") {
+			t.Fatalf("a correctly-configured identity-MAC box must warn about NOTHING; got %q", l)
+		}
+	}
+}
+
+// ...but silence must be earned. The same shape with the hazard present has to speak, or the fix
+// above is just the warning deleted.
+func TestPathLines_IdentityModeWarnsOnTheConditionsThatActuallyBreakIt(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		o    pathObs
+		want string
+	}{
+		{"two adapters on one MAC — what parked MACs exist to prevent",
+			pathObs{Identity: "48:21:0b:6e:06:85", MACs: []macFact{
+				{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
+				{Dev: "wlo1", Cur: "48:21:0b:6e:06:85", Perm: "98:bd:80:ec:68:cd"},
+			}}, "MAC COLLISION"},
+		{"the identity is on neither leg, so the reservation points off-host",
+			pathObs{Identity: "48:21:0b:6e:06:85", MACs: []macFact{
+				{Dev: "enp114s0", Cur: "4a:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
+				{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: "98:bd:80:ec:68:cd"},
+			}}, "worn by NO claimant"},
+		{"a standby on a MAC netgov never sets — half-applied swap or a foreign clone",
+			pathObs{Identity: "48:21:0b:6e:06:85", MACs: []macFact{
+				{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
+				{Dev: "wlo1", Cur: "02:11:22:33:44:55", Perm: "98:bd:80:ec:68:cd"},
+			}}, "netgov did not put it there"},
+		{"unreadable permanent MAC is a finding, because the planner REFUSES on it",
+			pathObs{Identity: "48:21:0b:6e:06:85", MACs: []macFact{
+				{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
+				{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: ""},
+			}}, "permanent MAC unknown"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := pathLines("192.168.222.153", "enp114s0", c.o); !has(t, got, c.want) {
+				t.Fatalf("want %q; got %q", c.want, got)
+			}
+		})
+	}
+}
+
+// The parked MAC is a LEGITIMATE resting place, not an anomaly — a standby whose permanent MAC is
+// itself the identity has nowhere else to go. Flagging it would recreate the always-on warning in
+// a new costume on exactly the boxes that use the mechanism hardest.
+func TestPathLines_ParkedStandbyIsNotAHazard(t *testing.T) {
+	got := pathLines("192.168.222.153", "wlo1", pathObs{
+		Identity: "98:bd:80:ec:68:cd",
+		MACs: []macFact{
+			{Dev: "enp114s0", Cur: "4a:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
+			{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: "98:bd:80:ec:68:cd"},
+		},
+	})
+	for _, l := range got {
+		if contains(l, "⚠") {
+			t.Fatalf("a parked standby is the mechanism working; got %q", l)
+		}
+	}
+}
+
+// Extra excludes the guarded address by construction, so NOTHING was watching for the one state
+// that is a fault under both mechanisms. Assert it under identity mode, where the old line is gone.
+func TestPathLines_TwoLegsHoldingTheGuardedAddressIsAlwaysAFault(t *testing.T) {
+	got := pathLines("192.168.222.153", "enp114s0", pathObs{
+		Gateway:  "192.168.222.1",
+		OnDev:    "enp114s0",
+		OnSrc:    "192.168.222.153",
+		Identity: "48:21:0b:6e:06:85",
+		Holders:  []string{"enp114s0", "wlo1"},
+		MACs: []macFact{
+			{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
+			{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: "98:bd:80:ec:68:cd"},
+		},
+	})
+	if !has(t, got, "SPLIT-BRAIN: enp114s0 and wlo1") {
+		t.Fatalf("both legs on the guarded address must be reported; got %q", got)
 	}
 }
 

@@ -136,3 +136,61 @@ func TestCanDefaultStr_AutoIsDistinctFromYes(t *testing.T) {
 		t.Fatal("yes and no must differ")
 	}
 }
+
+// A "restore" that INSTALLS a netgov artefact is the worst failure this file can have — it fires
+// exactly when someone is already recovering from something else. Found live on .153 on
+// 2026-08-15: state.json held `4A\:21\:0B\:6E\:06\:85` as eth-lan's pre-netgov cloned-mac-address,
+// which is netgov's own parked MAC, so `netgov reset` would have pinned the cable leg to a MAC the
+// router does not reserve .153 to. No measurement could have caught this: the wrong value is only
+// read during a reset, and the reset would have looked like it worked.
+func TestSavedMACIsOurs_RejectsAnIdentityMACRecordedAsAUserBaseline(t *testing.T) {
+	st := &State{Patterns: []Pattern{{
+		Name:  "LH",
+		Claim: &Claim{Address: "192.168.222.153", IdentityMAC: "48:21:0b:6e:06:85"},
+	}}}
+	// nmcli's terse output escapes the colons; a MAC must not compare unequal to itself.
+	drop, why := savedMACIsOurs(st, NMSaved{
+		Profile: "eth-lan", Prop: "802-3-ethernet.cloned-mac-address",
+		Original: `48\:21\:0B\:6E\:06\:85`,
+	})
+	if !drop {
+		t.Fatalf("the identity MAC is netgov's own value and must never be restored as a baseline; why=%q", why)
+	}
+}
+
+// The other half: a value netgov never writes is the user's, and dropping it would be netgov
+// deciding it knows better than a setting it did not make.
+func TestSavedMACIsOurs_KeepsAValueNetgovNeverWrites(t *testing.T) {
+	st := &State{Patterns: []Pattern{{
+		Name:  "LH",
+		Claim: &Claim{Address: "192.168.222.153", IdentityMAC: "48:21:0b:6e:06:85"},
+	}}}
+	for _, v := range []string{"random", "stable", "02:11:22:33:44:55"} {
+		if drop, _ := savedMACIsOurs(st, NMSaved{
+			Profile: "eth-lan", Prop: "802-3-ethernet.cloned-mac-address", Original: v,
+		}); drop {
+			t.Errorf("%q is a user setting, not netgov's — it must be restored verbatim", v)
+		}
+	}
+	// And nothing outside cloned-mac-address is this function's business.
+	if drop, _ := savedMACIsOurs(st, NMSaved{
+		Profile: "eth-lan", Prop: "ipv4.never-default", Original: "yes",
+	}); drop {
+		t.Error("never-default is not a MAC and must be left alone")
+	}
+}
+
+// honestMACBaseline is the record-time half. It must not depend on a permanent-MAC lookup to
+// recognise the identity, because the identity is knowable from the claim alone.
+func TestHonestMACBaseline_WillNotRecordTheIdentityAsAnOriginal(t *testing.T) {
+	cl := &Claim{Address: "192.168.222.153", IdentityMAC: "48:21:0b:6e:06:85"}
+	if got := honestMACBaseline(`48\:21\:0B\:6E\:06\:85`, cl, "enp114s0"); got != "" {
+		t.Fatalf("recording netgov's own identity as the user baseline is how the .153 record went wrong; got %q", got)
+	}
+	if got := honestMACBaseline("random", cl, "enp114s0"); got != "random" {
+		t.Fatalf("a user's own clone setting must record verbatim; got %q", got)
+	}
+	if got := honestMACBaseline("", cl, "enp114s0"); got != "" {
+		t.Fatalf("unset records as unset; got %q", got)
+	}
+}

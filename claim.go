@@ -680,11 +680,22 @@ func claimPaths(cl *Claim, holder string) []string {
 	}
 	obs.OffDev, obs.OffSrc = routeGet("4", "1.1.1.1", "")
 	for _, c := range cl.Claimants {
+		if devHoldsAddr(c.Dev, cl.Address) {
+			obs.Holders = append(obs.Holders, c.Dev)
+		}
 		if c.Dev == holder {
 			continue
 		}
 		for _, a := range devSubnetAddrs(c.Dev, cl.Address) {
 			obs.Extra = append(obs.Extra, c.Dev+" "+a)
+		}
+	}
+	// Only in identity mode, and only here: two `ethtool -P` calls per claimant on a REPORTING path
+	// is fine, on the dispatcher hot path it would not be. claimReconcile reads them separately.
+	if cl.IdentityMAC != "" {
+		obs.Identity = cl.IdentityMAC
+		for _, c := range cl.Claimants {
+			obs.MACs = append(obs.MACs, macFact{Dev: c.Dev, Cur: devCurrentMAC(c.Dev), Perm: devPermMAC(c.Dev)})
 		}
 	}
 	return pathLines(cl.Address, holder, obs)
@@ -699,7 +710,13 @@ type pathObs struct {
 	OffDev, OffSrc string   // unbound, off-link
 	BoundDev       string   // bound to the claimed address, on-link
 	Extra          []string // "dev addr": a NON-holder holding another address on the guarded subnet
+	Identity       string   // the claim's identity MAC; "" means lease arbitration, not identity-MAC
+	MACs           []macFact
+	Holders        []string // every claimant currently carrying the guarded address
 }
+
+// macFact is one adapter's MAC reality: what it wears now, and what it was born with.
+type macFact struct{ Dev, Cur, Perm string }
 
 // pathLines turns the observations into the report. Pure: no I/O, so a test can assert the effect.
 func pathLines(addr, holder string, o pathObs) []string {
@@ -710,13 +727,7 @@ func pathLines(addr, holder string, o pathObs) []string {
 	if o.OffDev != "" {
 		out = append(out, fmt.Sprintf(" path: %-24s -> %-14s src %s", "off-link (1.1.1.1)", o.OffDev, orDash(o.OffSrc)))
 	}
-	// A standby holding its own address on the guarded subnet is reportable on its own account,
-	// whichever way the routes currently fall: it is on the segment, it competes for the reply
-	// path, and under arp_ignore=0 it answers ARP for the guarded address too.
-	for _, e := range o.Extra {
-		out = append(out, " ⚠ standby on the guarded subnet: "+e+
-			" — a second address on this subnet, so the standby is still on the segment")
-	}
+	out = append(out, standbyLines(o)...)
 	if o.OnDev == "" {
 		return out
 	}
@@ -739,6 +750,101 @@ func pathLines(addr, holder string, o pathObs) []string {
 	// warning from reading as "the address is unusable" when it is not.
 	if o.BoundDev != "" {
 		out = append(out, "   bound to "+addr+": on-link -> "+o.BoundDev)
+	}
+	return out
+}
+
+// standbyLines reports what is hazardous about a standby — and WHAT IS HAZARDOUS DEPENDS ON WHICH
+// MECHANISM THE CLAIM USES. This is c-001's finding of 2026-08-14, and it is worth stating in full
+// because the defect it names is one this file's own 2.23 rule warned against:
+//
+//	"the ⚠ standby on the guarded subnet warning is now stale under the new design. A standby
+//	 holding its own address is the entire point of identity-MAC failover, so that line will fire
+//	 permanently on every correctly-configured box — which trains you to ignore warnings."
+//
+// Under LEASE arbitration the old line is exactly right: the guarded address is won by whoever
+// DHCP gives it to, so a standby sitting on the segment with its own consolation address competes
+// for the reply path and, with arp_ignore=0, answers ARP for the guarded address as well.
+//
+// Under IDENTITY-MAC the same observation means the opposite. Each leg has its own reservation and
+// its own address ON PURPOSE — that is what lets failover move the identity without ever taking an
+// adapter down. Reporting the design as a warning is not a harmless surplus: a warning that is
+// always on is indistinguishable from a warning that is never checked, and it would have masked
+// the conditions below, which really are faults.
+func standbyLines(o pathObs) []string {
+	// The one condition that is a fault under BOTH mechanisms, and the one neither Extra nor the
+	// MAC facts can see: two adapters of this host carrying the guarded address at once. Extra
+	// excludes the guarded address by construction, so nothing else was looking for it.
+	var out []string
+	if len(o.Holders) > 1 {
+		out = append(out, " ⚠ SPLIT-BRAIN: "+strings.Join(o.Holders, " and ")+
+			" both carry the guarded address — arbitration has not converged; run `netgov claim apply`")
+	}
+	if o.Identity == "" {
+		for _, e := range o.Extra {
+			out = append(out, " ⚠ standby on the guarded subnet: "+e+
+				" — a second address on this subnet, so the standby is still on the segment")
+		}
+		return out
+	}
+	return append(out, identityHazards(o)...)
+}
+
+// identityHazards is the identity-MAC replacement: not "a standby exists" (it should) but the three
+// MAC states that break the mechanism. Pure, for the same reason pathLines is — arranging any of
+// them on a live box means deliberately breaking the operator's own network.
+func identityHazards(o pathObs) []string {
+	var out []string
+	id := strings.ToLower(o.Identity)
+
+	// 1. Two adapters wearing one MAC. This is the failure the parked-MAC rule exists to prevent,
+	//    and it shipped once as a planner bug that cleared the loser's clone straight into a
+	//    collision — caught by the operator before it ran, then by a test. Report it first: it
+	//    makes every other reading on the segment unreliable.
+	wear := map[string][]string{}
+	for _, m := range o.MACs {
+		if m.Cur != "" {
+			c := strings.ToLower(m.Cur)
+			wear[c] = append(wear[c], m.Dev)
+		}
+	}
+	said := map[string]bool{}
+	for _, m := range o.MACs {
+		c := strings.ToLower(m.Cur)
+		if c == "" || said[c] || len(wear[c]) < 2 {
+			continue
+		}
+		said[c] = true
+		out = append(out, " ⚠ MAC COLLISION: "+strings.Join(wear[c], " and ")+" both wear "+c+
+			" — one identity on two adapters of one segment; the router's ARP table and its"+
+			" reservation can each point at only one of them")
+	}
+
+	// 2. Nobody wearing the identity. The address is reserved to a MAC that is not on this host,
+	//    so no leg can take it and no amount of arbitration will help. Silent otherwise: a lease
+	//    can be absent for ordinary reasons, but the identity MAC cannot.
+	if len(wear[id]) == 0 {
+		out = append(out, " ⚠ identity MAC "+id+" is worn by NO claimant — the router reserves "+
+			"the guarded address to a MAC that is not present on this host")
+	}
+
+	// 3. A standby on a MAC netgov did not put there. Its permanent MAC and its parked variant are
+	//    the only two netgov ever sets; anything else is someone else's clone, a stale setting, or
+	//    a half-applied swap, and failover from it is not predictable.
+	for _, m := range o.MACs {
+		if m.Cur == "" || strings.EqualFold(m.Cur, id) {
+			continue
+		}
+		if m.Perm == "" {
+			out = append(out, " ⚠ "+m.Dev+": permanent MAC unknown (ethtool -P), so the "+m.Cur+
+				" it wears cannot be checked — and a swap involving it would be REFUSED")
+			continue
+		}
+		if strings.EqualFold(m.Cur, m.Perm) || strings.EqualFold(m.Cur, parkedMAC(m.Perm)) {
+			continue
+		}
+		out = append(out, " ⚠ "+m.Dev+" wears "+m.Cur+", which is neither its permanent MAC "+m.Perm+
+			" nor its parked MAC "+parkedMAC(m.Perm)+" — netgov did not put it there")
 	}
 	return out
 }
@@ -1509,6 +1615,44 @@ func claimWatchLine() string {
 	}
 }
 
+// honestMACBaseline answers "what was here before netgov?" given what is here NOW — and refuses to
+// answer with a value netgov itself writes.
+//
+// nmRecordOriginal records the first value it sees and never revises it, which is right: a second
+// write must not overwrite the user's baseline with netgov's own. But it makes the FIRST read
+// load-bearing, and there are several ways for netgov's own value to be sitting there by then — a
+// build that wrote before the recording existed (which is exactly what happened here), a crash
+// between `nmcli modify` and `saveState`, or a hand-run nmcli. When that happens the record
+// enshrines netgov's artefact as the user's baseline, and `reset` stops being a restore: it
+// INSTALLS a parked MAC onto a leg whose address reservation does not name it. A restore that
+// leaves the box worse than not restoring is the worst failure this file can have, because it is
+// the thing the operator reaches for when something has already gone wrong.
+//
+// So: only three values are ever netgov's here — the identity MAC, the device's permanent MAC, and
+// its parked variant. Seeing one of those with nothing recorded means the record was missed, not
+// that the user chose it. The honest baseline is then "unset", which is also what `reset` should do:
+// netgov never *removes* a clone the user set, and a user-set clone (`random`, `stable`, or some
+// third MAC) is not in that set and records verbatim.
+func honestMACBaseline(cur string, cl *Claim, dev string) string {
+	if cur == "" {
+		return ""
+	}
+	c := strings.ToLower(unescapeNM(cur))
+	if cl != nil && strings.EqualFold(c, cl.IdentityMAC) {
+		return ""
+	}
+	if perm := devPermMAC(dev); perm != "" {
+		if strings.EqualFold(c, perm) || strings.EqualFold(c, parkedMAC(perm)) {
+			return ""
+		}
+	}
+	return cur
+}
+
+// unescapeNM strips nmcli's terse-output backslash escaping (`4A\:21\:…`), which otherwise makes a
+// MAC compare unequal to itself.
+func unescapeNM(s string) string { return strings.ReplaceAll(s, `\`, "") }
+
 // applyMACOps executes an identity-MAC plan IN ORDER (losers release before the winner claims),
 // writing NetworkManager's cloned-mac-address rather than raw `ip link` so the change is
 // declarative, survives NM reasserting itself, and is restored by `netgov reset`.
@@ -1528,10 +1672,15 @@ func applyMACOps(cl *Claim, ops []macOp) []string {
 		if devIsWireless(o.Dev) {
 			key = "802-11-wireless.cloned-mac-address"
 		}
-		// Record the pre-netgov value ONCE so `reset` restores it (nmprops.go rules apply).
+		// Record the pre-netgov value ONCE so `reset` restores it (nmprops.go rules apply) — but
+		// NEVER record a value netgov itself could have written. See honestMACBaseline: found on
+		// .153, 2026-08-15, with `4A:21:0B:6E:06:85` — netgov's own parked MAC — sitting in
+		// state.json as eth-lan's "original".
 		if st := loadState(statePath()); st != nil {
-			if curv, ok := nmGet(prof, key); ok && nmRecordOriginal(st, prof, key, curv) {
-				saveStateKeepOwner(st, statePath())
+			if curv, ok := nmGet(prof, key); ok {
+				if nmRecordOriginal(st, prof, key, honestMACBaseline(curv, cl, o.Dev)) {
+					saveStateKeepOwner(st, statePath())
+				}
 			}
 		}
 		if err := runPriv("nmcli", "connection", "modify", prof, key, o.Set); err != nil {

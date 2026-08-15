@@ -293,6 +293,41 @@ func applyUplinkRouting(st *State) (int, []string) {
 	return n, notes
 }
 
+// savedMACIsOurs reports whether a recorded "original" cloned-mac-address is in fact a value netgov
+// writes — the identity MAC of any claim, or the device's own permanent or parked MAC. Pure enough
+// to test: everything it needs comes from st plus two lookups on the named device.
+//
+// The pair with honestMACBaseline is deliberate. That one stops NEW bad records; this one disarms
+// the ones already written, which is the half that matters on a box that has already run failover.
+// Both are cheap, and the failure they prevent only ever shows up during a reset — i.e. while
+// someone is already recovering from something else.
+func savedMACIsOurs(st *State, s NMSaved) (bool, string) {
+	if s.Original == "" || !strings.HasSuffix(s.Prop, "cloned-mac-address") {
+		return false, ""
+	}
+	cur := strings.ToLower(unescapeNM(s.Original))
+	for _, p := range st.Patterns {
+		if p.Claim != nil && p.Claim.IdentityMAC != "" && strings.EqualFold(cur, p.Claim.IdentityMAC) {
+			return true, "this is claim " + p.Claim.Address + "'s identity MAC, which netgov sets"
+		}
+	}
+	dev := profileDev(st, s.Profile)
+	if dev == "" {
+		return false, ""
+	}
+	perm := devPermMAC(dev)
+	if perm == "" {
+		return false, ""
+	}
+	if strings.EqualFold(cur, perm) {
+		return true, dev + "'s permanent MAC — a clone of the hardware address is netgov clearing, not a user setting"
+	}
+	if strings.EqualFold(cur, parkedMAC(perm)) {
+		return true, "netgov's own parked MAC for " + dev
+	}
+	return false, ""
+}
+
 // restoreNMProps puts every taken-over property back to the value it had before netgov touched it,
 // and forgets the records. This is what keeps `netgov reset` a complete restore now that netgov
 // writes NM — the whole justification for allowing it to write at all.
@@ -301,6 +336,15 @@ func restoreNMProps(st *State) []string {
 	devs := map[string]bool{}
 	for _, s := range st.NMSaved {
 		v := s.Original
+		// A recorded "original" that is recognisably netgov's own would make reset INSTALL an
+		// artefact rather than remove one — and a parked MAC installed on the leg the router
+		// reserves the address to would cost the box its identity at the worst moment. Re-check
+		// here as well as at record time, because the bad records already exist in the field:
+		// .153 carried one from the 2.27 live failover test until 2.28.
+		if drop, why := savedMACIsOurs(st, s); drop {
+			out = append(out, "dropped "+s.Profile+" "+s.Prop+" = "+dash(s.Original)+" ("+why+"); unsetting instead")
+			v = ""
+		}
 		if v == "" {
 			// nmcli rejects an empty value; the reset word for "back to automatic" is "".
 			// Passing the literal below is how nmcli spells "unset this property".
