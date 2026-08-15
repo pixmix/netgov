@@ -244,6 +244,19 @@ mechanism instead:
 | `⚠ identity MAC … worn by NO claimant` | the router reserves the address to a MAC not present here, so no leg can take it |
 | `⚠ … neither its permanent MAC nor its parked MAC` | a foreign clone or a half-applied swap; failover from it is not predictable |
 | `⚠ HOLDS is not PATH` | the holder is correct and the host talks on the *other* adapter — chosen by route metric, not by the arbiter |
+| `⚠ N DISTINCT HOSTS answer for <gw>` | a real address conflict on the gateway — every reading through it is unreliable until resolved |
+
+**Duplicate replies are not a duplicate responder (2.31).** If the probe sees more replies than it
+sent, netgov reads the MAC of each one and tells you which case it is:
+
+- **`+N duplicate DELIVERY from <mac>`** — one host, frames arriving twice. On Wi-Fi this is an
+  ordinary retransmission after a lost ACK, so it tracks link quality and channel contention
+  (`iw dev <ap> station dump` → `tx failed`), not addressing. Nothing to fix on the router.
+- **`⚠ N DISTINCT HOSTS answer`** — two machines really do claim the gateway address. This is the
+  condition the arbiter exists for, and it is checked independently of the counts: two responders
+  while sent and received happen to balance is still a conflict.
+- **`responder MACs unreadable`** — the question is left open rather than answered with the
+  scarier of the two.
 
 A correctly-configured identity-MAC host prints **no `⚠` at all**.
 

@@ -247,6 +247,23 @@ import (
 // INCIDENT, AND EACH TIME IT WAS APPLIED ONLY TO THE CASE THAT PRODUCED IT. Same shape as 2.28's
 // stale warning. Writing a rule down is not the same as re-asking it of the next code path.
 //
+// 2.31 removes a guess that this tool had been printing as a finding. The gateway probe reported
+// "+N DUPLICATE replies — more than one host may be answering for <gw>", and two contributors spent
+// real time hunting that host. It does not exist: measured on the Pi5, one interface holds .1,
+// arp_ignore=1, proxy_arp=0 on every interface, no relayd, no WDS, no MAC learned on two bridge
+// ports, and every probe from both legs returned exactly ONE MAC. What the AP did show was
+// tx-failure counts on a channel shared with three other APs — i.e. retransmission.
+//
+// Duplicate REPLIES and duplicate RESPONDERS are different findings with opposite remedies, and
+// arping prints the MAC of every reply, so the tool can simply answer instead of speculating.
+// arpingResponders parses that field, which the old code discarded before guessing at what it
+// would have said. Note the conflict check no longer depends on the count arithmetic: two hosts
+// answering while sent and received happen to balance is still a conflict, and the clamp hid it.
+//
+// The rule, which is the same one 2.28-2.30 each paid for in a different currency: A DIAGNOSIS
+// PRINTED WITH A MEASUREMENT INHERITS THE MEASUREMENT'S AUTHORITY. If the evidence does not
+// distinguish two causes, the output must say so rather than name the more alarming one.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -258,7 +275,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.30"
+const artefactVersion = "netgov/2.31"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"

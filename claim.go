@@ -170,6 +170,66 @@ const (
 // The exit code is a proxy and it lies in both directions: it is 0 if any single reply arrives
 // (hiding 76% loss), and this very session observed `arping -q ... -i 0.1` exit 0 while printing
 // "invalid argument" and probing nothing at all. The counts are the measurement; rc is an opinion.
+// arpingResponders returns the DISTINCT MACs that answered, in first-seen order. arping prints one
+// line per reply — `Unicast reply from 192.168.222.1 [98:FE:54:03:BD:C4]  0.888ms` — and the old
+// code parsed only the two summary counters, throwing away the one field that answers the question
+// the summary then went on to guess at.
+func arpingResponders(out string) []string {
+	var macs []string
+	seen := map[string]bool{}
+	for _, ln := range strings.Split(out, "\n") {
+		i := strings.Index(ln, "[")
+		j := strings.Index(ln, "]")
+		if i < 0 || j <= i+1 || !strings.Contains(ln, "reply from") {
+			continue
+		}
+		m := strings.ToLower(ln[i+1 : j])
+		if !seen[m] {
+			seen[m] = true
+			macs = append(macs, m)
+		}
+	}
+	return macs
+}
+
+// duplicateVerdict says what the duplicates MEAN, and refuses to guess between the two cases.
+//
+// The old text read "+N DUPLICATE replies — more than one host may be answering for <gw>", which is
+// a hypothesis wearing a measurement's clothes. It sent two contributors hunting a phantom device on
+// 2026-08-15: c-001 escalated it off WATCH after seeing +1/+2/+4/+5 under load, and I went to the
+// router to fix a second responder that does not exist. Measured on the Pi5 that day — one interface
+// holds .1, arp_ignore=1, proxy_arp=0 everywhere, no relayd, no WDS, no MAC on two bridge ports, and
+// every probe from both legs returned exactly ONE MAC. What the stations DID show was tx-failure
+// counts (57 on the worst leg) on a channel shared with three other APs.
+//
+// Duplicate REPLIES and duplicate RESPONDERS are different findings with opposite remedies, and
+// arping hands us the field that separates them:
+//
+//	≥2 distinct MACs  -> a real address conflict; the thing this arbiter exists for.
+//	1 MAC, recv>sent  -> one host, frames delivered more than once. On 802.11 that is an ordinary
+//	                     retransmission after a lost ACK — a link-quality signal, not a conflict.
+//	no MACs parsed    -> say that the question is unresolved rather than picking the scarier answer.
+//
+// Note the distinct-MAC check does not depend on dup>0: two hosts answering while the counts happen
+// to balance is still a conflict, and the count arithmetic would have hidden it.
+func duplicateVerdict(dup int, gw string, macs []string) string {
+	if len(macs) > 1 {
+		return fmt.Sprintf(" — ⚠ %d DISTINCT HOSTS answer for %s (%s): a real address conflict,"+
+			" and every reading taken through this gateway is unreliable until it is resolved",
+			len(macs), gw, strings.Join(macs, ", "))
+	}
+	if dup == 0 {
+		return ""
+	}
+	if len(macs) == 1 {
+		return fmt.Sprintf(" (+%d duplicate DELIVERY from %s — ONE responder whose frames arrived"+
+			" more than once, typically an 802.11 retransmission after a lost ACK; a link-quality"+
+			" signal, NOT a second host)", dup, macs[0])
+	}
+	return fmt.Sprintf(" (+%d duplicate replies, responder MACs unreadable — whether this is one"+
+		" host or two is NOT established)", dup)
+}
+
 func arpingStats(out string) (sent, recv int, ok bool) {
 	for _, ln := range strings.Split(out, "\n") {
 		f := strings.Fields(ln)
@@ -260,8 +320,10 @@ func devGatewayAnswers(dev string) (bool, string) {
 		return true, "gateway probe unreadable — NOT verified"
 	}
 	// DUPLICATE REPLIES: recv can EXCEED sent. Observed live — "10/9 replies, -11% loss" — because
-	// arping counts responses, and more than one host answering inflates the count (a deadline can
-	// also truncate the sent count after a reply is already in flight).
+	// arping counts every reply it sees, and a frame delivered twice inflates the count as surely as
+	// a second host would (a deadline can also truncate the sent count after a reply is in flight).
+	// WHICH of those it is, is not knowable from the counters — see duplicateVerdict, and do not
+	// re-introduce a guess here.
 	//
 	// Left unhandled this is dangerous in exactly the wrong direction: negative loss sails under
 	// any ceiling, so a leg with duplicate responders reports PERFECT health. And duplicate ARP
@@ -280,9 +342,7 @@ func devGatewayAnswers(dev string) (bool, string) {
 	}
 	loss := 100 * (sent - recv) / sent
 	stat := fmt.Sprintf("%d/%d replies to %s, %d%% loss", recv, sent, gw, loss)
-	if dup > 0 {
-		stat += fmt.Sprintf(" (+%d DUPLICATE replies — more than one host may be answering for %s)", dup, gw)
-	}
+	stat += duplicateVerdict(dup, gw, arpingResponders(out))
 	if loss > claimMaxLossPct {
 		// Report the FRACTION, not the verdict: "3/20 replies (85% loss)" tells an operator what
 		// happened and is checkable; "not eligible" throws the measurement away.

@@ -507,3 +507,62 @@ func TestCooldownSuppresses_NeverOutlastsTheDamageItCaused(t *testing.T) {
 		t.Error("no recent failure must never suppress")
 	}
 }
+
+// 2026-08-15: "more than one host may be answering for 192.168.222.1" was a HYPOTHESIS printed as a
+// finding, and it cost two contributors real time — c-001 escalated it off WATCH, and I went to the
+// router to fix a second responder that does not exist. The router was clean on every axis that
+// could produce one: a single interface holding .1, arp_ignore=1, proxy_arp=0, no relayd, no WDS,
+// no MAC learned on two bridge ports, and one MAC in every probe from both legs.
+//
+// Duplicate REPLIES and duplicate RESPONDERS are different findings with opposite remedies. arping
+// prints the MAC of every reply, so the tool can answer this instead of speculating.
+func TestArpingResponders_ParsesTheMACOfEveryReply(t *testing.T) {
+	const one = `ARPING 192.168.222.1 from 192.168.222.153 enp114s0
+Unicast reply from 192.168.222.1 [98:FE:54:03:BD:C4]  0.888ms
+Unicast reply from 192.168.222.1 [98:FE:54:03:BD:C4]  0.955ms
+Sent 2 probes (1 broadcast(s))
+Received 3 response(s)`
+	if got := arpingResponders(one); len(got) != 1 || got[0] != "98:fe:54:03:bd:c4" {
+		t.Fatalf("one responder seen twice is ONE responder; got %v", got)
+	}
+	const two = `Unicast reply from 192.168.222.1 [98:FE:54:03:BD:C4]  0.888ms
+Unicast reply from 192.168.222.1 [00:E0:4C:68:00:37]  1.021ms`
+	if got := arpingResponders(two); len(got) != 2 {
+		t.Fatalf("two distinct MACs must both be reported; got %v", got)
+	}
+}
+
+func TestDuplicateVerdict_DoesNotCallARetransmissionAConflict(t *testing.T) {
+	// The measured Shenzhen case: duplicates, one responder, a congested 2.4GHz channel.
+	got := duplicateVerdict(5, "192.168.222.1", []string{"98:fe:54:03:bd:c4"})
+	if contains(got, "DISTINCT HOSTS") || contains(got, "conflict") {
+		t.Fatalf("one MAC delivered twice is a link-quality signal, not an address conflict; got %q", got)
+	}
+	if !contains(got, "NOT a second host") {
+		t.Errorf("the benign case must say so explicitly, or the reader supplies the scary reading; got %q", got)
+	}
+}
+
+func TestDuplicateVerdict_StillShoutsWhenTwoHostsReallyAnswer(t *testing.T) {
+	got := duplicateVerdict(3, "192.168.222.1", []string{"98:fe:54:03:bd:c4", "00:e0:4c:68:00:37"})
+	if !contains(got, "DISTINCT HOSTS") {
+		t.Fatalf("two responders is the condition this arbiter exists for; got %q", got)
+	}
+	// And it must not need the count arithmetic to notice — two hosts answering while sent and
+	// received happen to balance is still a conflict, and the clamp would have hidden it.
+	if got := duplicateVerdict(0, "192.168.222.1", []string{"aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"}); !contains(got, "DISTINCT HOSTS") {
+		t.Fatal("a conflict with balanced counts must still be reported")
+	}
+}
+
+// Unresolved must read as unresolved. Picking the scarier answer when the evidence is missing is
+// the same defect as picking the reassuring one.
+func TestDuplicateVerdict_SaysWhenItCannotTell(t *testing.T) {
+	got := duplicateVerdict(2, "192.168.222.1", nil)
+	if !contains(got, "NOT established") {
+		t.Fatalf("unparsed MACs must leave the question open; got %q", got)
+	}
+	if duplicateVerdict(0, "192.168.222.1", []string{"98:fe:54:03:bd:c4"}) != "" {
+		t.Error("no duplicates and one responder is the healthy case and must add nothing")
+	}
+}
