@@ -205,6 +205,20 @@ import (
 // four releases later shipped exactly that: the rule was held about the OLD condition and never
 // re-asked of the new one.
 //
+// 2.29 fixes the route-add race that had been dismissed as a cosmetic error count. `linkNet` asked
+// the ROUTE table for the on-link prefix while `uplinkLive` had already gated on the ADDRESS, and
+// NetworkManager sets `noprefixroute` — it installs the address and the prefix route as two
+// separate steps. Between them the planner believed the interface live and found no prefix, skipped
+// the on-link route, and the default it added next had no gateway it could resolve. Deriving the
+// prefix from the address removes the disagreement at its source: it is the same observation the
+// caller already made. The damage was never the error line — `clean` flushes the table
+// unconditionally, so the failed rebuild left the `from <src> table N` rule pointing at an EMPTY
+// table, traffic fell through to main and kept working, and the state survived ELEVEN HOURS on .153
+// undetected. So `apply` now also asserts the EFFECT (does the table actually have a default?) and
+// names the consequence instead of counting errors. Two rules of this project's own, both written
+// down and both unapplied here until it bit: assert the effect, and never let a signal mean the
+// same thing whether the failure was harmless or total.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -216,7 +230,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.28"
+const artefactVersion = "netgov/2.29"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -576,9 +590,10 @@ func run(argv ...string) (string, error) {
 // ---- `ip -j` parsing ----
 type ipAddr struct {
 	AddrInfo []struct {
-		Family string `json:"family"`
-		Local  string `json:"local"`
-		Scope  string `json:"scope"`
+		Family    string `json:"family"`
+		Local     string `json:"local"`
+		Scope     string `json:"scope"`
+		PrefixLen int    `json:"prefixlen"`
 	} `json:"addr_info"`
 }
 type ipRoute struct {
@@ -655,7 +670,34 @@ func defaultGW(dev, fam string) string {
 	return ""
 }
 
+// linkNet returns the on-link prefix to install in the uplink's own table, so that the default
+// route added next has a gateway it can resolve THERE.
+//
+// It asks the ADDRESS first, and that ordering is the whole fix (2.29). Measured on .153:
+//
+//	! ip route add default via 192.168.222.1 dev enp114s0 table 100 -> Error: Nexthop has invalid gateway.
+//	netgov: applied (13 cmds, 1 errors)
+//
+// 13 commands, not 14 — the on-link route was silently skipped, which is what made the default
+// unresolvable. NetworkManager sets `noprefixroute` on the addresses it manages (verified on both
+// legs here), so the kernel does NOT auto-create the prefix route: NM adds it as a SEPARATE step
+// after the address. Deriving the prefix from `ip route show ... scope link` therefore races that
+// second step, while `uplinkLive` has already gated on the address from the FIRST — so the planner
+// reached this point believing the interface was live and found nothing to install.
+//
+// The consequence is far worse than one error line, and it is why this is a correctness fix and not
+// a cosmetic one: `clean` flushes the table unconditionally, the rebuild then fails, and the
+// `from <src> table N` rule is added anyway. That leaves a rule pointing at an EMPTY table. Traffic
+// falls through to main and still works, so nothing looks wrong, while every domain pin for that
+// source is silently not in effect. On .153 that state persisted ELEVEN HOURS after a 03:44 link
+// flap, undetected, because the only signal was "1 errors" in a root-owned log.
+//
+// The address cannot be missing here — uplinkLive already required it. Falling back to the route
+// query preserves the old behaviour for anything the address parse cannot answer.
 func linkNet(dev, fam string) string {
+	if n := linkNetFromAddr(dev, fam); n != "" {
+		return n
+	}
 	out, err := run(ipfam(fam, "-j", "route", "show", "dev", dev, "scope", "link")...)
 	if err != nil {
 		return ""
@@ -667,6 +709,47 @@ func linkNet(dev, fam string) string {
 	for _, r := range rs {
 		if r.Dst != "" && r.Dst != "default" {
 			return r.Dst
+		}
+	}
+	return ""
+}
+
+// linkNetFromAddr derives the on-link prefix from the interface's own address — the same source
+// uplinkLive gated on, so the two cannot disagree.
+func linkNetFromAddr(dev, fam string) string {
+	out, err := run("ip", "-j", "addr", "show", "dev", dev)
+	if err != nil {
+		return ""
+	}
+	return parseLinkNet(out, fam)
+}
+
+// parseLinkNet is split out so the masking is testable without an interface to point it at.
+func parseLinkNet(jsonOut, fam string) string {
+	var addrs []ipAddr
+	if json.Unmarshal([]byte(jsonOut), &addrs) != nil {
+		return ""
+	}
+	want := "inet"
+	if fam == "6" {
+		want = "inet6"
+	}
+	for _, a := range addrs {
+		for _, ai := range a.AddrInfo {
+			if ai.Family != want || ai.Scope != "global" || ai.PrefixLen == 0 {
+				continue
+			}
+			if fam == "6" && strings.HasPrefix(strings.ToLower(ai.Local), "fd") {
+				continue
+			}
+			// Mask to the network. `192.168.222.153/24` as a destination would install a /32-ish
+			// host route in disguise; the gateway must be covered by the PREFIX for the default
+			// added next to resolve.
+			_, netw, err := net.ParseCIDR(ai.Local + "/" + itoa(ai.PrefixLen))
+			if err != nil {
+				continue
+			}
+			return netw.String()
 		}
 	}
 	return ""
@@ -908,7 +991,71 @@ func applyRoot(st *State) {
 			saveStateKeepOwner(st, statePath())
 		}
 	}
+	for _, l := range applyVerify(st) {
+		fmt.Fprintln(os.Stderr, l)
+	}
 	fmt.Printf("netgov: applied (%d cmds, %d errors)\n", len(build), errs)
+}
+
+// applyVerify asserts the EFFECT of the build rather than trusting the exit codes — this project's
+// own rule, and the one it kept failing to apply to itself. "applied (13 cmds, 1 errors)" was the
+// entire signal for a table that had been left empty behind a live rule for eleven hours; an error
+// COUNT names how many commands failed, never what stopped working, and it decays into background
+// noise precisely because it is the same line whether the failure was harmless or total.
+//
+// The state it looks for is specific: `clean` flushes every uplink's table unconditionally, so any
+// failure during the rebuild leaves the `from <src> table N` rule pointing at an EMPTY table.
+// Traffic then falls through to main and keeps working, which is exactly why nobody notices — while
+// every domain pin for that source is silently not in effect.
+func applyVerify(st *State) []string {
+	var out []string
+	for _, u := range st.Uplinks {
+		if servingDev(st, u.Dev) {
+			continue
+		}
+		for _, fam := range []string{"4", "6"} {
+			src, gw, ok := uplinkLive(u, fam)
+			if !ok || gw == "" {
+				continue
+			}
+			if tableHasDefault(u.Table, fam) {
+				continue
+			}
+			out = append(out, tableGapLine(u.Name, src, u.Table, fam))
+		}
+	}
+	return out
+}
+
+// tableGapLine names the CONSEQUENCE, in the terms the operator can check. Pure, so the wording is
+// asserted by a test instead of by arranging a failed route add.
+func tableGapLine(name, src string, table int, fam string) string {
+	v := "v4"
+	if fam == "6" {
+		v = "v6"
+	}
+	return "  ⚠ uplink " + name + " (" + v + "): table " + itoa(table) + " has NO default, but rule" +
+		" `from " + src + " table " + itoa(table) + "` is installed — traffic from " + src +
+		" falls through to main and still works, so nothing looks broken, while every pin routed" +
+		" through this uplink is NOT in effect. Re-run `netgov apply` once the link has settled."
+}
+
+// tableHasDefault reports whether the uplink's own table actually carries a default route.
+func tableHasDefault(table int, fam string) bool {
+	out, err := run(ipfam(fam, "-j", "route", "show", "table", itoa(table))...)
+	if err != nil {
+		return true // cannot measure is not evidence of a fault (invariant 4)
+	}
+	var rs []ipRoute
+	if json.Unmarshal([]byte(out), &rs) != nil {
+		return true
+	}
+	for _, r := range rs {
+		if r.Dst == "default" {
+			return true
+		}
+	}
+	return false
 }
 
 func resetRoot(st *State) {
