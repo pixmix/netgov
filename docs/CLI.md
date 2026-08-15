@@ -247,6 +247,30 @@ mechanism instead:
 
 A correctly-configured identity-MAC host prints **no `⚠` at all**.
 
+### Recovering a failover by hand (2.30)
+
+> ⚠️ **Stop the timer first.** `netgov-claim-watch.timer` re-applies the claim every 60 s, so a
+> manual `nmcli` fix to a `cloned-mac-address` netgov manages **is reverted within the second**:
+> ```
+> systemctl stop netgov-claim-watch.timer     # then recover; start it again after
+> ```
+> Since 2.30 netgov logs `NOTE: overriding …` whenever it overwrites an external change, naming
+> this command — but the safest order is still to stop it before you touch anything.
+
+**What a healthy identity move looks like**, and the two lines that are *not* failures:
+
+| line | meaning |
+|---|---|
+| `staged: … (no carrier on X)` | the MAC is written and applies when the link returns — the ordinary cable-pull case |
+| `applied (activation incomplete)` | the MAC landed; `connection up` timed out because that MAC has **no DHCP reservation**, which is expected for a parked leg |
+| `COOLDOWN OVERRIDDEN` | a previous attempt failed and left the address held by nobody, so the backoff is being ignored — correct, and the only time it happens |
+| `ABORT: … is NOT on the intended MAC` | a real stop: the MAC could not be verified, so continuing risks two adapters on one MAC |
+
+⚠️ **A parked leg holds a MAC the router has no reservation for**, so it depends on the DHCP server
+handing it a **pool address**. Where the pool is exhausted or absent, the parked leg ends up with no
+address at all and reads `UNCONFIGURED, not lossy` — it will not win the claim back until it is
+addressable again. Check the server has a pool before arming identity-MAC on a box you cannot reach.
+
 ## Links
 
 ```

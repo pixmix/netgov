@@ -243,6 +243,16 @@ func devGatewayAnswers(dev string) (bool, string) {
 	if _, err := exec.LookPath("arping"); err != nil {
 		return true, "" // tool absent: cannot test, fail open
 	}
+	// UNCONFIGURED IS NOT BROKEN. An arping out of a leg with no IPv4 address loses every frame, so
+	// the probe reports 80-100% loss and the leg reads as FAULTY — when the only thing wrong with it
+	// is that netgov itself just stripped its address. Two different conditions collapsing into one
+	// verdict, and the second is self-inflicted (c-001, n-283 §4). The verdict is unchanged — an
+	// addressless leg still cannot serve the claim right now — but the REASON has to say which of
+	// the two it is, or the operator reads "90% loss" and goes looking for a cable fault.
+	if devSrc(dev, "4") == "" {
+		return false, "no IPv4 address on " + dev + " — UNCONFIGURED, not lossy: a probe from an " +
+			"addressless leg cannot succeed, so this is not evidence against the link"
+	}
 	out, _ := run("arping", "-I", dev, "-c", strconv.Itoa(claimProbeCount),
 		"-w", strconv.Itoa(claimProbeDeadline), gw) // rc deliberately ignored — see arpingStats
 	sent, recv, ok := arpingStats(out)
@@ -1135,9 +1145,24 @@ func claimReconcile(cl *Claim, dry bool) []string {
 		if dry {
 			return append(log, "DRY-RUN: nothing applied")
 		}
+		// A COOLDOWN PROTECTS AGAINST RETRY STORMS. IT MUST NEVER PROTECT THE STATE A FAILED
+		// ATTEMPT CREATED. c-001, n-283: the claim-watch timer diagnosed `STRANDED: .186 is held by
+		// NOBODY` five times in five minutes, correctly re-elected the winner each time, and then
+		// declined to act on its own backoff — turning a ~90-second fault into 8.5 minutes on
+		// production. The awkward part is that the cooldown was working exactly as written; fixing
+		// its swallowed write (2026-08-13) is what let it bite.
+		//
+		// So the distinction is not "how recently did we fail" but "did the failure leave the
+		// resource worse than it found it". Nobody holding the address IS that state, and retrying
+		// from it cannot do further harm — there is nothing left to lose and the box is already
+		// unreachable at that address.
 		if recent, left := claimFailedRecently(cl.Address); recent {
-			return append(log, "SUPPRESSED: an attempt on "+cl.Address+" failed recently; not retrying for "+
-				strconv.Itoa(left)+"s. Clear "+claimFailFile+" to retry sooner.")
+			if cooldownSuppresses(recent, currentHolder(cl)) {
+				return append(log, "SUPPRESSED: an attempt on "+cl.Address+" failed recently; not retrying for "+
+					strconv.Itoa(left)+"s. Clear "+claimFailFile+" to retry sooner.")
+			}
+			log = append(log, "COOLDOWN OVERRIDDEN: "+cl.Address+" is held by NOBODY, so the backoff"+
+				" ("+strconv.Itoa(left)+"s left) is protecting the damage rather than the network — retrying now")
 		}
 		return append(log, applyMACOps(cl, ops)...)
 	}
@@ -1681,6 +1706,18 @@ func applyMACOps(cl *Claim, ops []macOp) []string {
 				if nmRecordOriginal(st, prof, key, honestMACBaseline(curv, cl, o.Dev)) {
 					saveStateKeepOwner(st, statePath())
 				}
+				// SAY SO WHEN OVERRIDING SOMEBODY ELSE'S VALUE. c-001 recovered .186 by hand
+				// during the n-283 outage and watched the next tick silently undo it one second
+				// later (NM audit: their connection-update at 15:41:26, netgov's set-cloned at
+				// 15:41:27). An operator fixing a fault has no reason to suspect the safety
+				// device, and a revert that leaves no trace is indistinguishable from the fix
+				// not having worked. Naming the escape hatch here is the whole point — it is the
+				// one moment someone is looking.
+				if cv := unescapeNM(curv); cv != "" && !strings.EqualFold(cv, o.Set) {
+					log = append(log, "NOTE: overriding "+prof+"'s current "+key+" ("+cv+" -> "+
+						dash(o.Set)+"). If you are recovering by hand, `systemctl stop"+
+						" netgov-claim-watch.timer` first — otherwise this is re-applied within 60s.")
+				}
 			}
 		}
 		if err := runPriv("nmcli", "connection", "modify", prof, key, o.Set); err != nil {
@@ -1700,8 +1737,27 @@ func applyMACOps(cl *Claim, ops []macOp) []string {
 					" — the MAC is written and applies when the link returns)")
 				continue
 			}
+			// MEASURE, do not infer from the exit code — the rule this file states twenty lines
+			// below and did not follow here. `nmcli connection up` returns 4 when a profile fails
+			// to fully ACTIVATE, and for a leg just moved onto a MAC the router holds no
+			// reservation for, a DHCP timeout is the EXPECTED outcome. The MAC is applied on
+			// activation, before any address is sought, so the exit code says nothing about the
+			// thing we actually care about.
+			//
+			// This cost 8.5 minutes of .186 on production (c-001, n-283, 2026-08-15). The abort
+			// fired on the FIRST op — the loser's park — after `connection modify` had already
+			// succeeded. So netgov gave up the identity MAC, refused to continue, and left the
+			// address worn by NOBODY. Aborting mid-plan is only safe before the destructive half;
+			// here it WAS the destructive half.
+			if cur := devCurrentMAC(o.Dev); macOpAchieved(o, cur, cl.IdentityMAC) {
+				log = append(log, "applied (activation incomplete): "+o.Why+" — "+o.Dev+" wears "+
+					cur+" as intended; `connection up` returned "+err.Error()+", which for a leg"+
+					" whose MAC has no DHCP reservation is the expected timeout, not a failure")
+				continue
+			}
 			log = append(log, "ABORT: "+prof+" did not come back up after the MAC change ("+err.Error()+
-				") and it still has carrier — refusing to continue with a possible MAC conflict")
+				"), it still has carrier, and "+o.Dev+" is NOT on the intended MAC (reads "+
+				dash(devCurrentMAC(o.Dev))+") — refusing to continue with a possible MAC conflict")
 			_ = recordClaimFailure(cl.Address)
 			return log
 		}
@@ -1725,6 +1781,40 @@ func applyMACOps(cl *Claim, ops []macOp) []string {
 	return append(log, "FAILED: "+macWinner(ops)+" did not end up holding "+cl.Address+" within "+
 		strconv.Itoa(claimAcquireTimeout)+"s. Nothing was taken down and every claimant keeps its own address, "+
 		"so the box remains reachable — check the router reserves "+cl.Address+" to "+cl.IdentityMAC+".")
+}
+
+// cooldownSuppresses decides whether a recent failure should hold this attempt back. Named and pure
+// because the rule it encodes is the one that cost 8.5 minutes of production, and an inline
+// condition is exactly how it went unexamined the first time.
+//
+// The question is NOT "did we fail recently" but "did the failure leave the resource worse than it
+// found it". A backoff exists to stop a retry storm from degrading a working system; when nobody
+// holds the address there is no working system left to protect, and each suppressed tick is pure
+// outage. holder == "" is that state.
+func cooldownSuppresses(recentFailure bool, holder string) bool {
+	return recentFailure && holder != ""
+}
+
+// macOpAchieved reports whether an op got what it was for, measured from the device rather than
+// inferred from nmcli's exit status. Pure, so the case that cost production can be asserted without
+// arranging a half-failed activation.
+//
+// A LOSER op (Set == "") has exactly one safety requirement: stop wearing the identity. Which MAC
+// it lands on instead is a detail — its own permanent MAC or a parked variant are both fine, and
+// insisting on one of them would abort a plan that had already achieved the thing that matters.
+// A SET op (winner, or a parking loser) must land on precisely the MAC named.
+//
+// An unreadable MAC is NOT success. Losing the ability to measure fails closed here, unlike the
+// gateway probe, because the consequence is asymmetric: a wrong "achieved" continues a plan that
+// may leave two adapters on one MAC, while a wrong "not achieved" only stops early.
+func macOpAchieved(o macOp, cur, identity string) bool {
+	if cur == "" {
+		return false
+	}
+	if o.Set != "" {
+		return strings.EqualFold(cur, o.Set)
+	}
+	return !strings.EqualFold(cur, identity)
 }
 
 // macWinner returns the device the plan ends on — the one that takes the identity.

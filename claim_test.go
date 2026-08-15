@@ -435,3 +435,75 @@ func TestFromDispatcher_RecognisesTheExplicitFlag(t *testing.T) {
 		t.Fatal("a hand-run must NOT look like a dispatcher run, or MAC ops never apply at all")
 	}
 }
+
+// n-283, 2026-08-15: netgov took .186 off the air for 8.5 minutes ON PRODUCTION. The abort fired
+// on the FIRST op — the loser's park — after `connection modify` had already succeeded, so the
+// identity MAC was given up and then the plan refused to continue. The address was worn by nobody.
+//
+// The trigger was an exit code standing in for a measurement, in a function whose own comment
+// twenty lines later says "Verify the EFFECT, not the exit codes". `nmcli connection up` returns 4
+// when a profile fails to ACTIVATE, and a DHCP timeout is the expected outcome for a leg just moved
+// onto a MAC the router holds no reservation for — while the MAC itself applied fine.
+func TestMacOpAchieved_AParkedLoserWithAFailedActivationHasStillReleasedTheIdentity(t *testing.T) {
+	park := macOp{Dev: "eno1", Set: "1e:69:7a:6b:f7:c6"}
+	if !macOpAchieved(park, "1e:69:7a:6b:f7:c6", "1c:69:7a:6b:f7:c6") {
+		t.Fatal("the park landed; aborting here is what stranded .186 for 8.5 minutes")
+	}
+	// Case-insensitively, because nmcli and sysfs disagree on case.
+	if !macOpAchieved(park, "1E:69:7A:6B:F7:C6", "1c:69:7a:6b:f7:c6") {
+		t.Error("MAC comparison must be case-insensitive or every real reading fails it")
+	}
+}
+
+// A clear-op only has to give up the identity — which MAC it lands on instead is not netgov's
+// business, and demanding a specific one would abort a plan that had already achieved the point.
+func TestMacOpAchieved_AClearOpOnlyHasToStopWearingTheIdentity(t *testing.T) {
+	clear := macOp{Dev: "wlo1", Set: ""}
+	if !macOpAchieved(clear, "98:bd:80:ec:68:cd", "48:21:0b:6e:06:85") {
+		t.Error("back on its permanent MAC is a released loser")
+	}
+	if macOpAchieved(clear, "48:21:0b:6e:06:85", "48:21:0b:6e:06:85") {
+		t.Fatal("still wearing the identity is NOT released — this is the MAC-conflict case the abort exists for")
+	}
+}
+
+// Losing the ability to measure must fail CLOSED here, unlike the gateway probe. The consequence is
+// asymmetric: a wrong "achieved" continues a plan that may put two adapters on one MAC, while a
+// wrong "not achieved" only stops early.
+func TestMacOpAchieved_AnUnreadableMACIsNotSuccess(t *testing.T) {
+	for _, o := range []macOp{{Dev: "eno1", Set: "1e:69:7a:6b:f7:c6"}, {Dev: "eno1", Set: ""}} {
+		if macOpAchieved(o, "", "1c:69:7a:6b:f7:c6") {
+			t.Errorf("an unreadable MAC must never read as success (op Set=%q)", o.Set)
+		}
+	}
+}
+
+// The winner must still land on EXACTLY the identity — this is the half of the check that has to
+// stay strict, or the fix above would turn the abort into a rubber stamp.
+func TestMacOpAchieved_TheWinnerMustLandOnExactlyTheIdentity(t *testing.T) {
+	win := macOp{Dev: "wlp0s20f3", Set: "1c:69:7a:6b:f7:c6"}
+	if macOpAchieved(win, "3c:58:c2:d7:cb:8e", "1c:69:7a:6b:f7:c6") {
+		t.Fatal("a winner still on its own MAC has not taken the identity; continuing would report a move that did not happen")
+	}
+}
+
+// The second half of n-283, and the more insidious one. The claim-watch timer diagnosed
+// `STRANDED: .186 is held by NOBODY` five times in five minutes, correctly re-elected the winner
+// each time, and then declined to act on its own backoff — turning a ~90-second fault into 8.5
+// minutes on the box carrying production.
+//
+// The awkward part, worth keeping: the cooldown was working exactly as specified. Fixing its
+// swallowed write (the 2026-08-13 unit-test finding) is what allowed it to bite. A correct
+// mechanism guarding the wrong question.
+func TestCooldownSuppresses_NeverOutlastsTheDamageItCaused(t *testing.T) {
+	if cooldownSuppresses(true, "") {
+		t.Fatal("nobody holds the address: every suppressed tick is pure outage, and retrying " +
+			"cannot make a total outage worse")
+	}
+	if !cooldownSuppresses(true, "eno1") {
+		t.Error("a held address still deserves a backoff — that is the retry storm the cooldown is for")
+	}
+	if cooldownSuppresses(false, "eno1") || cooldownSuppresses(false, "") {
+		t.Error("no recent failure must never suppress")
+	}
+}

@@ -219,6 +219,34 @@ import (
 // down and both unapplied here until it bit: assert the effect, and never let a signal mean the
 // same thing whether the failure was harmless or total.
 //
+// 2.30 is a production incident, and it is netgov's own fault. c-001 ran the authorised failover
+// test on ms-rosy and netgov took .186 off the air for 8.5 MINUTES (n-283). Three defects, each
+// one a rule this file states elsewhere and did not follow here:
+//
+//  1. THE ABORT INFERRED FROM AN EXIT CODE, twenty lines above a comment saying "Verify the
+//     EFFECT, not the exit codes". `nmcli connection up` returns 4 when a profile fails to
+//     ACTIVATE, and a DHCP timeout is the EXPECTED outcome for a leg just moved onto a MAC the
+//     router holds no reservation for — while the MAC applied fine. The abort fired on the FIRST
+//     op, the loser's park, so netgov gave up the identity and then refused to continue: the
+//     address was worn by nobody. Aborting mid-plan is only safe BEFORE the destructive half.
+//     Now it measures the MAC (macOpAchieved) and continues when the op actually landed.
+//  2. THE COOLDOWN PROTECTED THE DAMAGE IT CAUSED. claim-watch diagnosed `STRANDED: held by
+//     NOBODY` five times, re-elected the winner five times, and declined to act each time on its
+//     own 5-minute backoff. A backoff stops a retry storm from degrading a working system; with
+//     nobody holding the address there is no working system left to protect and every suppressed
+//     tick is pure outage. The uncomfortable part: the cooldown was working exactly as written —
+//     fixing its swallowed write on 2026-08-13 is what let it bite.
+//  3. IT SILENTLY REVERTED A MANUAL RECOVERY. c-001 cleared the clone by hand at 15:41:26 and the
+//     next tick undid it at 15:41:27, with nothing in any log to say so. A safety device that
+//     overrides an operator mid-incident must SAY it is doing so and name its own off switch.
+//
+// Also: a leg with no IPv4 address probed as 80-100% loss, i.e. netgov judged a leg it had just
+// stripped as broken. Same verdict, honest reason now.
+//
+// The pattern across all three is one thing: EVERY RULE THIS FILE HAS WAS WRITTEN AFTER AN
+// INCIDENT, AND EACH TIME IT WAS APPLIED ONLY TO THE CASE THAT PRODUCED IT. Same shape as 2.28's
+// stale warning. Writing a rule down is not the same as re-asking it of the next code path.
+//
 // (2.16-2.19 were reconstructed here in 2.20 from their commit messages: each bumped the version
 // in its own commit, as the rule below requires, but none extended this block. A version history
 // that stops four releases short is the same class of defect as a stale version — the record of
@@ -230,7 +258,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.29"
+const artefactVersion = "netgov/2.30"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
