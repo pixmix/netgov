@@ -981,11 +981,16 @@ type claimVerdict struct {
 	Winner  string   // dev that should hold the address ("" = nobody eligible)
 	Holders []string // devs currently holding it
 	Lines   []string // human-readable reasoning, one per claimant
+	// Eligible is the MACHINE-READABLE half of Lines. 2.33 needs the per-claimant verdict to decide
+	// route-metric demotion, and the alternative — re-probing, or parsing the prose in Lines — would
+	// either double a 10s wall-clock cost or let the metric act on a different measurement than the
+	// address move did. One evaluation, one verdict, both consumers.
+	Eligible map[string]bool
 }
 
 // claimEvaluate decides who SHOULD hold the address and who currently DOES. Read-only.
 func claimEvaluate(cl *Claim) claimVerdict {
-	v := claimVerdict{}
+	v := claimVerdict{Eligible: map[string]bool{}}
 	cs := append([]Claimant(nil), cl.Claimants...)
 	sort.SliceStable(cs, func(i, j int) bool { return cs[i].Priority > cs[j].Priority })
 
@@ -1012,6 +1017,7 @@ func claimEvaluate(cl *Claim) claimVerdict {
 
 	for i, c := range cs {
 		ok, why := rs[i].ok, rs[i].why
+		v.Eligible[c.Dev] = ok
 		holds := devHoldsAddr(c.Dev, cl.Address)
 		if holds {
 			v.Holders = append(v.Holders, c.Dev)
@@ -1067,6 +1073,153 @@ func recordClaimFailure(addr string) error {
 }
 
 func clearClaimFailure() { _ = os.Remove(claimFailFile) }
+
+// ── Demotion: making the route metric follow the VERDICT instead of the config ──────────────────
+//
+// The gap this closes (c-001, ms-rosy 2026-08-16): rejecting a claimant as ineligible did not change
+// its `ipv4.route-metric`, which uplinkRoutingDesired derives from the DECLARED priority alone. So a
+// leg measuring 70-100% frame loss stayed the preferred egress while a healthy leg held the address:
+// the box answered ARP and accepted TCP on an address it could not source from, and looked half-dead
+// from outside. That is `HOLDS is not PATH` (2.20) one level up — the arbiter could SEE the
+// divergence and had no way to CLOSE it, though manage-metrics already owns the property.
+//
+// Two design constraints were named before writing this, and both shaped it:
+//
+//  1. It must not fight NetworkManager every tick. Hence a streak: a leg must fail
+//     claimDemoteStreak CONSECUTIVE evaluations before its metric moves.
+//  2. It needs a defined restore point, or netgov acquires a fourth property it holds and forgets —
+//     the 2.28 parked-MAC-baseline bug in a new costume. Solved by NOT STORING one: the metric is a
+//     pure function of (claim config, current verdict), so recovery restores the old ranking by
+//     recomputing it. There is no saved "original" to go stale, because nothing is saved.
+//
+// The record here is therefore RUNTIME state, not a baseline: on /run (tmpfs) so a reboot clears it,
+// with a TTL so a stale verdict cannot pin a leg down forever. Absent, stale or unreadable all mean
+// NO DEMOTION — the pre-2.33 behaviour. It fails toward doing nothing, which is the safe direction
+// and the opposite of the 2.28 record, whose failure mode was to apply a confident wrong value.
+var claimDemoteFile = "/run/netgov-claim.demoted"
+
+const (
+	claimDemoteTTL    = 900 // seconds; a verdict older than this is not evidence about now
+	claimDemoteStreak = 2   // consecutive ineligible verdicts before the metric moves
+)
+
+// demotionRecord is the parsed contents of claimDemoteFile: dev -> consecutive ineligible verdicts.
+type demotionRecord struct {
+	Streak map[string]int
+	Fresh  bool
+}
+
+func readDemotions() demotionRecord {
+	r := demotionRecord{Streak: map[string]int{}}
+	b, err := os.ReadFile(claimDemoteFile)
+	if err != nil {
+		return r
+	}
+	f := strings.Fields(strings.TrimSpace(string(b)))
+	if len(f) == 0 {
+		return r
+	}
+	ts, err := strconv.ParseInt(f[0], 10, 64)
+	if err != nil || time.Now().Unix()-ts > claimDemoteTTL {
+		return r // unreadable or stale => no demotion
+	}
+	r.Fresh = true
+	for _, kv := range f[1:] {
+		dev, n, ok := strings.Cut(kv, ":")
+		if !ok {
+			continue
+		}
+		if v, err := strconv.Atoi(n); err == nil && dev != "" {
+			r.Streak[dev] = v
+		}
+	}
+	return r
+}
+
+// recordDemotions writes the streaks. It RETURNS the error rather than swallowing it — /run is
+// root-owned, and the 2026-08-13 cooldown bug was exactly this write silently doing nothing for an
+// unprivileged process. A swallowed failure here would leave the metric following the config while
+// every log line said otherwise. Asserted in a test, because measurement cannot catch an absent write.
+func recordDemotions(streak map[string]int) error {
+	parts := []string{strconv.FormatInt(time.Now().Unix(), 10)}
+	devs := make([]string, 0, len(streak))
+	for d := range streak {
+		devs = append(devs, d)
+	}
+	sort.Strings(devs) // deterministic file contents, so a no-op write stays a no-op
+	for _, d := range devs {
+		if streak[d] > 0 {
+			parts = append(parts, d+":"+strconv.Itoa(streak[d]))
+		}
+	}
+	return os.WriteFile(claimDemoteFile, []byte(strings.Join(parts, " ")+"\n"), 0o644)
+}
+
+// nextDemotions folds a verdict into the running streaks. Pure — everything it needs is arguments —
+// so the policy below is unit-testable without a network, which is the whole reason it is separated
+// from the file I/O.
+//
+// ASYMMETRIC ON PURPOSE: slow to punish (claimDemoteStreak consecutive failures), instant to
+// forgive (one eligible verdict clears the streak). A demotion that lingers after recovery is a
+// self-inflicted `HOLDS is not PATH` — the very fault this exists to fix, with the sign flipped.
+func nextDemotions(prev map[string]int, v claimVerdict, claimants []Claimant) map[string]int {
+	next := map[string]int{}
+	// NOBODY ELIGIBLE => demote NOBODY. Moving metrics around when there is no healthy leg to move
+	// them toward cannot improve the path and only churns NM. Same reasoning as claim-before-release:
+	// with no eligible claimant the correct action is to leave everything exactly as it is.
+	if v.Winner == "" {
+		return next
+	}
+	for _, c := range claimants {
+		if v.Eligible[c.Dev] {
+			continue // streak cleared by omission — one good verdict forgives
+		}
+		next[c.Dev] = prev[c.Dev] + 1
+	}
+	return next
+}
+
+// demotionLines reports the metric demotion state for `claim status`.
+//
+// It says "no demotion in effect" rather than staying silent, because silence is exactly how the
+// original defect hid: the metric quietly followed the declared priority and nothing ever mentioned
+// the metric at all. A state worth acting on is worth naming even when it is the boring one.
+func demotionLines(cl *Claim) []string {
+	r := readDemotions()
+	var out []string
+	for _, c := range cl.Claimants {
+		n := r.Streak[c.Dev]
+		switch {
+		case !r.Fresh || n == 0:
+			continue
+		case n >= claimDemoteStreak:
+			out = append(out, "demoted: "+c.Dev+" ranked BELOW every eligible leg for the route metric"+
+				" ("+strconv.Itoa(n)+" consecutive ineligible verdicts; one good verdict restores it)")
+		default:
+			out = append(out, "demoted: "+c.Dev+" has "+strconv.Itoa(n)+" of "+
+				strconv.Itoa(claimDemoteStreak)+" ineligible verdicts — not demoted yet")
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, "demoted: none — every claimant's route metric follows its declared priority")
+	}
+	return out
+}
+
+// demotedDevs is what the metric planner consults: devices whose streak has reached the threshold.
+func demotedDevs() map[string]bool {
+	out := map[string]bool{}
+	r := readDemotions()
+	if !r.Fresh {
+		return out
+	}
+	for d, n := range r.Streak {
+		if n >= claimDemoteStreak {
+			out[d] = true
+		}
+	}
+	return out
+}
 
 // hookPath is where `netgov install` writes the NM dispatcher hook — the thing that actually runs
 // arbitration on a carrier event.
@@ -1161,6 +1314,30 @@ func hookBinary(hook string) string {
 func claimReconcile(cl *Claim, dry bool) []string {
 	v := claimEvaluate(cl)
 	log := append([]string(nil), v.Lines...)
+
+	// Record the eligibility streaks BEFORE any early return. A leg that is ineligible while nobody
+	// else is eligible still needs its streak tracked, and the "no eligible claimant" branch below
+	// returns immediately — putting this after it would mean the metric only ever followed the
+	// verdict on the ticks that also moved an address.
+	//
+	// Not in dry mode: a dry run that leaves real state behind is not a dry run. (nextDemotions is
+	// pure, so the dry path still shows what WOULD change without persisting it.)
+	if !dry {
+		next := nextDemotions(readDemotions().Streak, v, cl.Claimants)
+		if err := recordDemotions(next); err != nil {
+			// Do not swallow it. If this write fails the metric silently keeps following the static
+			// config while everything below reports a demotion — the 2026-08-13 cooldown bug exactly.
+			log = append(log, "NOTE: could not record eligibility streaks ("+err.Error()+
+				") — route metrics will keep following the declared priority, not the verdict")
+		}
+		for dev, n := range next {
+			if n >= claimDemoteStreak {
+				log = append(log, "DEMOTED: "+dev+" has failed "+strconv.Itoa(n)+
+					" consecutive evaluations — its route metric is ranked below every eligible leg"+
+					" (restored automatically on one good verdict)")
+			}
+		}
+	}
 
 	if v.Winner == "" {
 		log = append(log, "NO-OP: no eligible claimant — current holder keeps "+cl.Address+" (claim-before-release)")
@@ -1646,6 +1823,12 @@ func cmdClaim(st *State, args []string) {
 		// Liveness: arbitration on carrier edges alone leaves a stranded address stranded when the
 		// network goes quiet. Say whether the watchdog that covers that is actually running. (2.25)
 		fmt.Println(" " + claimWatchLine())
+		// A demotion changes which adapter the host SPEAKS from, so it must be visible where the
+		// holder is reported — otherwise `claim status` shows a leg at its declared priority while
+		// the metric says something else, which is the reporting half of the bug 2.33 fixes.
+		for _, l := range demotionLines(cl) {
+			fmt.Println(" " + l)
+		}
 		if cl.IdentityMAC != "" {
 			for _, c := range cl.Claimants {
 				mark := "  "

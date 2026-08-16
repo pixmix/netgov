@@ -66,6 +66,10 @@ no-op**: the value each property had *before* netgov first took it over is recor
   binary changes nothing on its own: the apply path runs from the NetworkManager
   dispatcher on carrier events, so enabling by default would hand netgov two host
   properties at the next link flap on a box whose operator never asked.
+  Since **2.33** the metric follows the arbiter's live verdict, not just the declared
+  priority: a leg judged ineligible twice running is ranked below every working leg,
+  and one good verdict restores it. Otherwise a rejected leg keeps the preferred
+  metric and the host advertises an address it cannot source from.
 - `cloned-mac-address` (2.27) is written only by a claim that declares `identity=`,
   and only while the arbiter is **armed** — that is what makes failover move the
   *MAC* instead of the *lease*. It is also restored on reset, and since 2.28 netgov

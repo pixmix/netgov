@@ -21,6 +21,12 @@ while you're typing in a field).
 > Metrics stay NetworkManager's until you run `netgov uplink manage-metrics on`.
 > The claim card tells you which of the two is currently governing.
 >
+> **Since 2.33 the metric follows the arbiter's verdict, not only the declared
+> priority.** A claimant judged ineligible on two consecutive evaluations is ranked
+> below every eligible leg and `claim status` reports it on a `demoted:` line; one good verdict
+> restores it. This closes the case where the arbiter correctly refused a faulty leg
+> and the host went on sourcing its traffic from it — `HOLDS is not PATH` one level up.
+>
 > **A third since 2.27:** `cloned-mac-address`, written only by a claim that declares
 > an `identity=` MAC and only while the arbiter is armed — that is how failover moves
 > the identity instead of the lease. Restored on reset like the others, and since 2.28

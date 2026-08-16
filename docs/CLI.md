@@ -68,10 +68,24 @@ than left invisible.
 | `no` | may **not** — e.g. a cable to a router you do not want capturing your egress |
 | `auto` | **netgov does not hold the property**; NetworkManager keeps whatever it has. The default. |
 
-`manage-metrics on` derives `ipv4.route-metric` from **claim priority**, so the
-adapter your claim says is preferred is also the one the host speaks from. Without
-it, an arbiter can hold an address on one adapter while every packet leaves on
-another — true, and not what the verdict is read as.
+`manage-metrics on` derives `ipv4.route-metric` from **claim priority and the
+arbiter's live verdict**, so the adapter your claim says is preferred *and that
+currently works* is the one the host speaks from. Without it, an arbiter can hold an
+address on one adapter while every packet leaves on another — true, and not what the
+verdict is read as.
+
+**Since 2.33 the verdict outranks the priority.** A claimant the arbiter judges
+ineligible on **2 consecutive evaluations** is ranked below every eligible leg,
+whatever its declared priority — otherwise a rejected leg keeps the preferred metric
+and the box advertises an address it cannot source from (measured on ms-rosy,
+2026-08-16: `.186` held by a healthy adapter while traffic left via one losing
+70–100 % of frames). One good verdict restores the original ranking immediately:
+slow to punish, instant to forgive.
+
+The demotion is **runtime state on `/run`** (cleared by a reboot, expires after 15
+minutes) and is deliberately *not* a saved baseline — absent, stale or unreadable all
+mean "no demotion", i.e. the pre-2.33 behaviour. The metric is recomputed from the
+current verdict rather than restored from a record, so there is nothing to go stale.
 
 **Nothing is written until `netgov apply`.** Run `netgov plan` first: the NM half is
 printed separately, with the reason beside each change. `netgov claim status` reports
