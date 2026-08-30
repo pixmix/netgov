@@ -189,3 +189,82 @@ func TestRecordDemotions_IsDeterministic(t *testing.T) {
 		t.Fatalf("same input must produce identical bytes; %q vs %q", first, second)
 	}
 }
+
+// TestStaleEvidenceWarning pins the signal whose absence cost ms-rosy its LAN on 2026-08-30
+// (n-649). The metric comparison in uplinkRoutingVerify CANNOT catch this case — with the record
+// aged out netgov wants the priority-only ranking and the kernel matches it exactly — so this
+// warning is the only thing standing between a silently un-consulted verdict and a black-holed box.
+func TestStaleEvidenceWarning(t *testing.T) {
+	cases := []struct {
+		name      string
+		manage    bool
+		claimants int
+		fresh     bool
+		want      bool
+	}{
+		{"the ms-rosy case: managed, two legs, evidence aged out", true, 2, false, true},
+		{"fresh evidence says nothing", true, 2, true, false},
+		{"metrics unmanaged: netgov holds no opinion to be stale", false, 2, false, false},
+		{"one claimant: nothing to rank, so no degradation to warn about", true, 1, false, false},
+		{"no claimants at all", true, 0, false, false},
+	}
+	for _, c := range cases {
+		got := staleEvidenceWarning(c.manage, c.claimants, c.fresh)
+		if (got != "") != c.want {
+			t.Errorf("%s: warning=%q, wanted-warning=%v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestStaleEvidenceFailsOpenToPriority documents the behaviour the warning exists to announce:
+// when the evidence is stale the demoted set is EMPTY, so ranking silently reverts to declared
+// priority and the highest-priority leg leads even if it is the one that has stopped forwarding.
+// This is the pre-2.33 behaviour returning by the back door, and it must never do so quietly.
+func TestStaleEvidenceFailsOpenToPriority(t *testing.T) {
+	cs := []Claimant{{Dev: "eno1", Priority: 100}, {Dev: "wlp0s20f3", Priority: 50}}
+
+	// Stale/absent evidence => empty demoted map => the dead leg still ranks first.
+	if got := rankClaimants(cs, map[string]bool{}); got[0].Dev != "eno1" {
+		t.Fatalf("stale evidence: expected priority-only ranking with eno1 first, got %s", got[0].Dev)
+	}
+	// ...and the warning must fire for exactly that state, or the revert is invisible.
+	if staleEvidenceWarning(true, len(cs), false) == "" {
+		t.Fatal("priority-only fallback must never be silent: no warning for stale evidence")
+	}
+	// Fresh evidence naming eno1 puts it last, which is the 2.33 behaviour we must not regress.
+	if got := rankClaimants(cs, map[string]bool{"eno1": true}); got[0].Dev != "wlp0s20f3" {
+		t.Fatalf("fresh evidence: expected the working leg first, got %s", got[0].Dev)
+	}
+}
+
+// TestDemotedHolderAlternative covers the decision that moves a production address off a leg the
+// arbiter has rejected. Before 2.34 nothing asked this question: claimNeedsAttention consulted
+// CARRIER only, so a link that trained at 1000Mb/s and forwarded nothing looked healthy and .186
+// stayed on it (n-649).
+func TestDemotedHolderAlternative(t *testing.T) {
+	cs := []Claimant{{Dev: "eno1", Priority: 100}, {Dev: "wlp0s20f3", Priority: 50}}
+
+	// The ms-rosy case: the holder is demoted and the other leg works => move.
+	alt, ok := demotedHolderAlternative("eno1", cs, map[string]bool{"eno1": true})
+	if !ok || alt != "wlp0s20f3" {
+		t.Fatalf("demoted holder with an eligible peer must move: got %q ok=%v", alt, ok)
+	}
+	// A healthy holder is never moved, whatever its priority.
+	if _, ok := demotedHolderAlternative("eno1", cs, map[string]bool{}); ok {
+		t.Fatal("an undemoted holder must not be moved")
+	}
+	// Every leg demoted => nowhere better to go; claim-before-release keeps the current holder.
+	if _, ok := demotedHolderAlternative("eno1", cs, map[string]bool{"eno1": true, "wlp0s20f3": true}); ok {
+		t.Fatal("with no eligible alternative the holder must keep the address")
+	}
+	// No holder at all is the STRANDED branch's business, not this one.
+	if _, ok := demotedHolderAlternative("", cs, map[string]bool{"eno1": true}); ok {
+		t.Fatal("an unheld address must not be handled here")
+	}
+	// Among several eligible legs the highest declared priority wins, not the first listed.
+	three := []Claimant{{Dev: "eno1", Priority: 100}, {Dev: "wlan0", Priority: 10}, {Dev: "wlan1", Priority: 80}}
+	alt, ok = demotedHolderAlternative("eno1", three, map[string]bool{"eno1": true})
+	if !ok || alt != "wlan1" {
+		t.Fatalf("expected the highest-priority eligible leg wlan1, got %q", alt)
+	}
+}

@@ -386,6 +386,16 @@ func devProfileName(st *State, dev string) string {
 // is the entire fault class 2.20 exists to report.
 func uplinkRoutingVerify(st *State) []string {
 	var out []string
+	// 2.34: the evidence check comes FIRST, because the metric comparison below cannot see this
+	// failure — when the record has aged out netgov WANTS the priority-only ranking, so the kernel
+	// agrees with it perfectly and every check passes while a dead leg leads the queue.
+	n := 0
+	if cl := claimForActive(st); cl != nil {
+		n = len(cl.Claimants)
+	}
+	if w := staleEvidenceWarning(st.ManageMetrics != nil && *st.ManageMetrics, n, readDemotions().Fresh); w != "" {
+		out = append(out, w)
+	}
 	for _, d := range uplinkRoutingDesired(st) {
 		if d.Prop != "ipv4.route-metric" {
 			continue
@@ -408,6 +418,27 @@ func uplinkRoutingVerify(st *State) []string {
 		}
 	}
 	return out
+}
+
+// staleEvidenceWarning is the signal whose ABSENCE let ms-rosy black-hole its own LAN for hours
+// while every check reported healthy (n-649, 2026-08-30).
+//
+// uplinkRoutingVerify compares the kernel's metric against what netgov WANTS. When the demotion
+// record has aged past claimDemoteTTL, netgov wants the declared-priority ranking — so the kernel
+// matches it exactly, the comparison passes, and nothing anywhere says that the verdict stopped
+// being consulted. The failure moves along an axis the check cannot see.
+//
+// Pure, so the one line that has to exist is testable without NetworkManager or a live claim.
+func staleEvidenceWarning(manageMetrics bool, claimants int, evidenceFresh bool) string {
+	// Below two claimants there is nothing to rank, so priority-only ranking is not a degradation
+	// and warning about it would be a caveat stronger than the fact it protects.
+	if !manageMetrics || claimants < 2 || evidenceFresh {
+		return ""
+	}
+	return "⚠ demotion evidence STALE or ABSENT (" + claimDemoteFile + " older than " +
+		strconv.Itoa(claimDemoteTTL) + "s) — route metrics are ranked by DECLARED PRIORITY ALONE," +
+		" not by the verdict, so a leg that has stopped forwarding can still outrank a working one." +
+		" Check that netgov-claim-watch.timer is active."
 }
 
 // liveRouteMetric reads the metric the KERNEL is currently using for dev's on-link prefix route —

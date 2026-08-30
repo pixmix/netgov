@@ -693,7 +693,18 @@ func claimNeedsAttention(cl *Claim) (bool, string) {
 				") has carrier and outranks the holder " + holder + " (priority " + strconv.Itoa(held) + ")"
 		}
 	}
-	return false, "holder " + holder + " is present and no higher-priority claimant has carrier"
+
+	// 2.34: the two questions above are both about CARRIER, and carrier is not forwarding. A leg
+	// that trains a link and passes no frames answers "healthy" to both, which is how ms-rosy came
+	// to hold .186 on a dead leg for hours while this function reported nothing to do (n-649).
+	// The verdict already knows better — ask it. Cheap: demotedDevs() is one file read, no probe.
+	if alt, ok := demotedHolderAlternative(holder, cl.Claimants, demotedDevs()); ok {
+		return true, "HOLDER DEMOTED: " + holder + " holds " + cl.Address +
+			" but the arbiter has judged it ineligible on " + strconv.Itoa(claimDemoteStreak) +
+			"+ consecutive evaluations, while " + alt + " is eligible — carrier said the link was" +
+			" fine, the verdict says it does not forward"
+	}
+	return false, "holder " + holder + " is present, not demoted, and no higher-priority claimant has carrier"
 }
 
 // currentHolder returns the claimant device that actually carries the address right now, or "".
@@ -1306,6 +1317,72 @@ func hookBinary(hook string) string {
 	return ""
 }
 
+// demotedHolderAlternative answers the question carrier cannot: is the leg currently HOLDING the
+// address one the arbiter has already rejected, while some other claimant is still eligible?
+//
+// Pure and separate so the decision that moves a production address is testable without a NIC.
+// Returns the eligible device to move to. Highest priority wins among the eligible, so a box with
+// several working legs does not pick arbitrarily.
+func demotedHolderAlternative(holder string, claimants []Claimant, demoted map[string]bool) (string, bool) {
+	if holder == "" || !demoted[holder] {
+		return "", false
+	}
+	best, bestPri := "", 0
+	for _, c := range claimants {
+		if c.Dev == holder || demoted[c.Dev] {
+			continue
+		}
+		if best == "" || c.Priority > bestPri {
+			best, bestPri = c.Dev, c.Priority
+		}
+	}
+	return best, best != ""
+}
+
+// claimRefreshEvidence re-evaluates every claimant and persists the eligibility streaks WITHOUT
+// touching a single address. Added in 2.34; it closes the defect that took ms-rosy off the LAN on
+// 2026-08-30 (n-649) and cost two nights of backup chain.
+//
+// THE DEFECT, because it is worth keeping: the only caller of recordDemotions was claimReconcile,
+// which the 60s timer reached only when claimNeedsAttention said an address had to MOVE. That gate
+// asks two questions — is the address held by nobody, and does a higher-priority claimant have
+// CARRIER. A leg that keeps carrier while forwarding no frames answers "no" to both, so the tick
+// returned in microseconds, the demotion record aged past claimDemoteTTL, demotedDevs() went empty,
+// and rankClaimants silently fell back to declared priority — restoring the exact pre-2.33
+// behaviour, with a dead leg ranked FIRST and no signal anywhere.
+//
+// HOLDS is not PATH, sitting in the watchdog's own trigger condition. claimReconcile's inner
+// early-returns were already guarded against precisely this ("Record the eligibility streaks BEFORE
+// any early return"); the guard was one level too low to help.
+func claimRefreshEvidence(cl *Claim) []string {
+	var log []string
+	v := claimEvaluate(cl)
+	prev := readDemotions()
+	next := nextDemotions(prev.Streak, v, cl.Claimants)
+	if err := recordDemotions(next); err != nil {
+		// Never swallowed: a failed write means the metric keeps following static config while
+		// everything else believes the verdict is being tracked.
+		return append(log, "NOTE: could not record eligibility streaks ("+err.Error()+
+			") — route metrics will keep following the declared priority, not the verdict")
+	}
+	// Silent unless the DEMOTED SET actually changes. This runs every 60s; a tick that always
+	// prints fills the journal, and a journal nobody reads is where the useful line goes to die.
+	for _, c := range cl.Claimants {
+		was := prev.Fresh && prev.Streak[c.Dev] >= claimDemoteStreak
+		now := next[c.Dev] >= claimDemoteStreak
+		if was == now {
+			continue
+		}
+		if now {
+			log = append(log, "DEMOTED: "+c.Dev+" has failed "+strconv.Itoa(next[c.Dev])+
+				" consecutive evaluations — ranked below every eligible leg")
+		} else {
+			log = append(log, "RESTORED: "+c.Dev+" passed — its route metric follows its declared priority again")
+		}
+	}
+	return log
+}
+
 // claimReconcile enforces exactly-one-holder. dry => plan only, mutate nothing.
 //
 // Ordering implements invariant 3: the winner is brought UP before any loser is taken down, so
@@ -1761,6 +1838,15 @@ func cmdClaim(st *State, args []string) {
 		// segment. Refuses to act when disarmed, exactly like `apply`.
 		if cl == nil {
 			return
+		}
+		// 2.34: refresh the eligibility evidence FIRST, unconditionally, and only then ask whether
+		// anything needs to move. The old order asked first and returned before recording anything,
+		// so a dead-but-carrier leg was never judged at all (n-649). Doing it in this order also
+		// means a fresh demotion is actionable on the SAME tick rather than 60s later.
+		if claimArmed() {
+			for _, l := range claimRefreshEvidence(cl) {
+				fmt.Println(" " + l)
+			}
 		}
 		need, why := claimNeedsAttention(cl)
 		if !need {
