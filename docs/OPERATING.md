@@ -94,14 +94,14 @@ now checks the condition it creates (2.18+):
 
 ```
 $ netgov claim
-claim 192.168.222.153   pattern=LH   arbitration: ENFORCING
+claim 10.0.0.10   pattern=LH   arbitration: ENFORCING
    armed: yes (/etc/netgov-claim.armed)
    hook: OK (/home/pm/bin/netgov, executable)
    probe: OK (/usr/bin/arping)
 ```
 
 ```
-claim 192.168.222.186   pattern=floor   arbitration: NOT ENFORCING
+claim 10.0.0.20   pattern=floor   arbitration: NOT ENFORCING
    armed: yes (/etc/netgov-claim.armed)
    hook: claim-aware but CANNOT EXECUTE — /root/bin/netgov does not exist
    probe: OK (/usr/bin/arping)
@@ -147,7 +147,7 @@ exists for.
 
 Eligibility measures the **loss fraction** to the gateway out of each claimant's own interface:
 10 ARP probes, **rejected above 10% loss**, reported as the fraction —
-`enp114s0: 10/10 replies to 192.168.222.1, 0% loss`.
+`enp114s0: 10/10 replies to 10.0.0.1, 0% loss`.
 
 Needs **`arping`** (`iputils-arping`). Without it the check **fails open** and eligibility falls
 back to carrier + association.
@@ -225,7 +225,7 @@ egress policy at all**. No uplinks, no rules, no `init`.
 netgov pat-set floor 0 --floor --v4 direct --v6 direct
 
 # 2. Declare the claim. `direct` normalises to "no default pinned", so this changes NO routing.
-netgov claim set floor 192.168.222.186 eno1:100 wlp0s20f3:50:CNNet
+netgov claim set floor 10.0.0.20 eno1:100 wlp0s20f3:50:HomeAP
 
 # 3. Verify before arming — read-only, safe.
 netgov claim
@@ -242,8 +242,8 @@ pattern on a box with no others — and a claim is **inert unless its pattern is
 claim on a conditional pattern (e.g. one triggered by an SSID) means arbitration stops exactly when
 that condition fails, which is usually the moment you need it.
 
-**Why SSIDs go on the claimant, not the pattern:** `wlp0s20f3:50:CNNet` says *this adapter counts
-only while associated to CNNet*. That keeps the arbitration itself unconditional. Never list an
+**Why SSIDs go on the claimant, not the pattern:** `wlp0s20f3:50:HomeAP` says *this adapter counts
+only while associated to HomeAP*. That keeps the arbitration itself unconditional. Never list an
 upstream/WAN SSID — an adapter on a different network is not a path to that address, and the arbiter
 would move the address somewhere it cannot be reached.
 
@@ -298,7 +298,7 @@ the standby off the segment — then verify **from the segment** that exactly on
 local port**:
 
 ```sh
-ssh -N -L 8475:127.0.0.1:8474 ms-rosy
+ssh -N -L 8475:127.0.0.1:8474 host-b
 ```
 
 > ⚠️ **The pages look identical.** Nothing on either says which host it is. Browser form state can

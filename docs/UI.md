@@ -142,13 +142,13 @@ automatically.
 - *rules* — one per line: `selector uplink [fam]`, where selector is a `domain` or
   `from:CIDR`. e.g. `api.example.com wifi` or `from:172.18.0.0/16 cable`.
 - *claim* — **same-address arbitration** (see below): `<address> <dev:prio[:ssid,…]>…`,
-  e.g. `192.168.222.153 enp114s0:100 wlo1:50:CNNet`. Leave empty for none.
+  e.g. `10.0.0.10 enp114s0:100 wlo1:50:HomeAP`. Leave empty for none.
 - **↧ snapshot current** — fill v4/v6/rules and tick the active AP from your *current*
   live config, so "save what I have now as a profile" is one click.
 
 Per row: **activate** (switch to it now), **edit** (load into the builder), **×**
 (delete). The badge by the title shows `ARMED · mode` or `disarmed`. A row carrying a
-claim is marked with the address it can move (`⇄192.168.222.153`) — this is the one
+claim is marked with the address it can move (`⇄10.0.0.10`) — this is the one
 pattern property that can **move an address between adapters**, so it is visible at a
 glance rather than only on edit.
 
@@ -171,9 +171,9 @@ Set it in the **pattern builder's `claim` field**, in the same grammar as the CL
 two cannot drift into dialects:
 
 ```
-192.168.222.153 identity=48:21:0b:6e:06:85 enp114s0:100 wlo1:50:CNNet
+10.0.0.10 identity=00:00:5e:00:53:01 enp114s0:100 wlo1:50:HomeAP
    address        the MAC the router reserves   wired,      Wi-Fi, only when
-                  it to — failover MOVES this   priority100  associated to CNNet,
+                  it to — failover MOVES this   priority100  associated to HomeAP,
                                                              priority 50
 ```
 

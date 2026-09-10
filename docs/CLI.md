@@ -25,8 +25,8 @@ State lives in `~/.config/netgov/state.json` (override with `NETGOV_STATE` or
 `apply` also verifies the *effect* and prints this when it fails:
 
 ```
-⚠ uplink cable (v4): table 100 has NO default, but rule `from 192.168.222.153 table 100`
-  is installed — traffic from 192.168.222.153 falls through to main and still works, so
+⚠ uplink cable (v4): table 100 has NO default, but rule `from 10.0.0.10 table 100`
+  is installed — traffic from 10.0.0.10 falls through to main and still works, so
   nothing looks broken, while every pin routed through this uplink is NOT in effect.
 ```
 
@@ -77,7 +77,7 @@ verdict is read as.
 **Since 2.33 the verdict outranks the priority.** A claimant the arbiter judges
 ineligible on **2 consecutive evaluations** is ranked below every eligible leg,
 whatever its declared priority — otherwise a rejected leg keeps the preferred metric
-and the box advertises an address it cannot source from (measured on ms-rosy,
+and the box advertises an address it cannot source from (measured on host-b,
 2026-08-16: `.186` held by a healthy adapter while traffic left via one losing
 70–100 % of frames). One good verdict restores the original ranking immediately:
 slow to punish, instant to forgive.
@@ -179,7 +179,7 @@ netgov claim clear <pattern>
 | adapter ever downed | **no** | sometimes |
 
 ```
-netgov claim set LH 192.168.222.153 identity=48:21:0b:6e:06:85 enp114s0:100 wlo1:50:CNNet
+netgov claim set LH 10.0.0.10 identity=00:00:5e:00:53:01 enp114s0:100 wlo1:50:HomeAP
 ```
 
 Prefer identity-MAC. `dnsmasq` documents that a multi-MAC reservation "will only work
@@ -243,7 +243,7 @@ and wrong for a server:
 
 ```
 netgov pat-set floor 0 --floor --v4 direct --v6 direct
-netgov claim set floor 192.168.222.186 eno1:100 wlp0s20f3:50:CNNet
+netgov claim set floor 10.0.0.20 eno1:100 wlp0s20f3:50:HomeAP
 ```
 
 `direct` normalises to "no default pinned", so declaring this changes no routing. No `init`
@@ -309,7 +309,7 @@ A correctly-configured identity-MAC host prints **no `⚠` at all**.
 | `ABORT: … is NOT on the intended MAC` | a real stop: the MAC could not be verified, so continuing risks two adapters on one MAC |
 
 **A parked leg holds a MAC the router has no reservation for**, so it takes a **pool address**, not
-its usual one. Two consequences, both measured on the 2026-08-15 ms-rosy failover:
+its usual one. Two consequences, both measured on the 2026-08-15 host-b failover:
 
 - The parked leg asks for its old address, is offered a pool address instead, and accepts —
   `DHCPDISCOVER .186 / DHCPOFFER .247 / DHCPACK .247`. That is the mechanism working: the

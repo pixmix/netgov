@@ -171,7 +171,7 @@ const (
 // (hiding 76% loss), and this very session observed `arping -q ... -i 0.1` exit 0 while printing
 // "invalid argument" and probing nothing at all. The counts are the measurement; rc is an opinion.
 // arpingResponders returns the DISTINCT MACs that answered, in first-seen order. arping prints one
-// line per reply — `Unicast reply from 192.168.222.1 [98:FE:54:03:BD:C4]  0.888ms` — and the old
+// line per reply — `Unicast reply from 10.0.0.1 [00:00:5E:00:53:03]  0.888ms` — and the old
 // code parsed only the two summary counters, throwing away the one field that answers the question
 // the summary then went on to guess at.
 func arpingResponders(out string) []string {
@@ -440,8 +440,8 @@ func parseRouteGet(out, from string) (dev, src string) {
 // This is the mechanism behind a HOLDS-is-not-PATH split, and it is worth naming separately from
 // the symptom. Measured on .153, 2026-08-14, with the router's own config as the evidence:
 //
-//	dhcp.r98bd80ec68cd.ip  = '192.168.222.153'
-//	dhcp.r98bd80ec68cd.mac = '98:bd:80:ec:68:cd' '48:21:0b:6e:06:85'   <- BOTH NUC adapters
+//	dhcp.r00005e000502.ip  = '10.0.0.10'
+//	dhcp.r00005e000502.mac = '00:00:5e:00:53:02' '00:00:5e:00:53:01'   <- BOTH NUC adapters
 //
 // That dual-MAC reservation is the dnsmasq case this whole file exists for. Arbitration works:
 // the standby does not get .153. But dnsmasq, refused from issuing the reserved address twice,
@@ -454,7 +454,7 @@ func parseRouteGet(out, from string) (dev, src string) {
 // Invariant 1 says a standby must neither hold nor request THE LEASE. This is the case it does not
 // cover: the standby is on the segment holding a DIFFERENT address, which is the same
 // standby-on-segment condition this project's own 2026-08-13 design correction named after
-// ms-rosy .186 — and, with arp_ignore=0, the standby still answers ARP for the guarded address
+// host-b .186 — and, with arp_ignore=0, the standby still answers ARP for the guarded address
 // too. Reported, not acted on: taking a second address away is a policy decision about the
 // operator's live path, not something an arbiter should infer.
 func devSubnetAddrs(dev, ref string) []string {
@@ -509,8 +509,8 @@ func refCIDR(holder, ref string) string {
 // The fix inverts what is arbitrated. THE ROUTER RESERVES THE ADDRESS TO ONE MAC, and each adapter
 // additionally holds its own reservation, so:
 //
-//	48:21:0b:6e:06:85 (wired) -> 192.168.222.153     the IDENTITY
-//	98:bd:80:ec:68:cd (wifi)  -> 192.168.222.154     always reachable, never contended
+//	00:00:5e:00:53:01 (wired) -> 10.0.0.10     the IDENTITY
+//	00:00:5e:00:53:02 (wifi)  -> 10.0.0.11     always reachable, never contended
 //
 // Failover then sets the winner's `cloned-mac-address` to the identity MAC. A host CAN enforce
 // "only one of my NICs wears this MAC" — it is local config with a single authority — which is
@@ -695,7 +695,7 @@ func claimNeedsAttention(cl *Claim) (bool, string) {
 	}
 
 	// 2.34: the two questions above are both about CARRIER, and carrier is not forwarding. A leg
-	// that trains a link and passes no frames answers "healthy" to both, which is how ms-rosy came
+	// that trains a link and passes no frames answers "healthy" to both, which is how host-b came
 	// to hold .186 on a dead leg for hours while this function reported nothing to do (n-649).
 	// The verdict already knows better — ask it. Cheap: demotedDevs() is one file read, no probe.
 	if alt, ok := demotedHolderAlternative(holder, cl.Claimants, demotedDevs()); ok {
@@ -723,14 +723,14 @@ func currentHolder(cl *Claim) string {
 // claimed address.
 //
 // WHY THIS EXISTS. On 2026-08-14 c-019 measured this box and found `claim status` reporting
-// `OK: enp114s0 already holds 192.168.222.153 exclusively`. That verdict was true — the address
+// `OK: enp114s0 already holds 10.0.0.10 exclusively`. That verdict was true — the address
 // was held, exclusively, by an eligible adapter probing 0% loss. And every packet the host
 // originated left over a *second* adapter, which had taken its own DHCP address on the same
 // subnet at a lower route metric. The arbiter's guarantee (exactly one adapter holds the address)
 // and the property a reader takes from it (the host talks on that adapter) had come apart
 // cleanly, on an armed box, with every check green.
 //
-// It is the mechanism this project already named on ms-rosy .186 — THE PATH IS CHOSEN BY ROUTE
+// It is the mechanism this project already named on host-b .186 — THE PATH IS CHOSEN BY ROUTE
 // METRIC, NOT BY WHO HOLDS THE ADDRESS. There it explained a fault; here it is a standing
 // condition that the tool's own output could not see. A verdict that is true and misread is a
 // reporting defect, and the fix for a reporting defect is to report the other half.
@@ -1087,7 +1087,7 @@ func clearClaimFailure() { _ = os.Remove(claimFailFile) }
 
 // ── Demotion: making the route metric follow the VERDICT instead of the config ──────────────────
 //
-// The gap this closes (c-001, ms-rosy 2026-08-16): rejecting a claimant as ineligible did not change
+// The gap this closes (c-001, host-b 2026-08-16): rejecting a claimant as ineligible did not change
 // its `ipv4.route-metric`, which uplinkRoutingDesired derives from the DECLARED priority alone. So a
 // leg measuring 70-100% frame loss stayed the preferred egress while a healthy leg held the address:
 // the box answered ARP and accepted TCP on an address it could not source from, and looked half-dead
@@ -1247,9 +1247,9 @@ const hookPath = "/etc/NetworkManager/dispatcher.d/90-netgov"
 // every angle available to an operator — systemctl clean, `claim status` giving a confident
 // verdict, the arm flag present, `grep -c claim` returning 8:
 //
-//	hook absent          ms-rosy 22:16-00:39   install had never been run there
-//	hook cannot execute  ms-rosy 00:30:53      pointed at /root/bin/netgov, logged "not found"
-//	probe inert          ms-rosy on 2.0        arping installed and capable; the build had no probe
+//	hook absent          host-b 22:16-00:39   install had never been run there
+//	hook cannot execute  host-b 00:30:53      pointed at /root/bin/netgov, logged "not found"
+//	probe inert          host-b on 2.0        arping installed and capable; the build had no probe
 //
 // Reporting a conjunction as a single boolean is what let all three hide. So the tool now detects
 // the silent condition it creates itself, rather than requiring three manual checks that only a
@@ -1340,7 +1340,7 @@ func demotedHolderAlternative(holder string, claimants []Claimant, demoted map[s
 }
 
 // claimRefreshEvidence re-evaluates every claimant and persists the eligibility streaks WITHOUT
-// touching a single address. Added in 2.34; it closes the defect that took ms-rosy off the LAN on
+// touching a single address. Added in 2.34; it closes the defect that took host-b off the LAN on
 // 2026-08-30 (n-649) and cost two nights of backup chain.
 //
 // THE DEFECT, because it is worth keeping: the only caller of recordDemotions was claimReconcile,
@@ -1432,7 +1432,7 @@ func claimReconcile(cl *Claim, dry bool) []string {
 		ops := claimMACPlan(cl, v.Winner, perm, cur)
 		// NOT FROM INSIDE THE NM DISPATCHER. `nmcli connection modify` re-enters NetworkManager
 		// while NM is still processing the dispatcher event that invoked us, and it fails: measured
-		// `ABORT: could not set 802-11-wireless.cloned-mac-address on CNNet (exit status 1)` on the
+		// `ABORT: could not set 802-11-wireless.cloned-mac-address on HomeAP (exit status 1)` on the
 		// hook path, while the identical command from the systemd timer succeeded seconds later.
 		// Worse than failing, it recorded a 300s cooldown that then SUPPRESSED the timer — the one
 		// path that could have done the job. So: plan, log, defer, and leave no cooldown behind.
@@ -1647,7 +1647,7 @@ func applyPatternClaim(p *Pattern) {
 	}
 }
 
-// parseClaimant parses "dev:priority[:ssid,ssid,...]" — e.g. "enp114s0:100" or "wlo1:50:CNNet,TowerNet".
+// parseClaimant parses "dev:priority[:ssid,ssid,...]" — e.g. "enp114s0:100" or "wlo1:50:HomeAP,UplinkAP".
 func parseClaimant(spec string) (Claimant, error) {
 	parts := strings.Split(spec, ":")
 	if len(parts) < 2 {
@@ -1676,7 +1676,7 @@ func parseClaimant(spec string) (Claimant, error) {
 
 // parseClaimForm parses the dashboard's single-line claim field into a Claim.
 //
-//	"192.168.222.153 enp114s0:100 wlo1:50:CNNet"   -> a claim
+//	"10.0.0.10 enp114s0:100 wlo1:50:HomeAP"   -> a claim
 //	""                                             -> nil (no claim)
 //
 // DELIBERATELY the same grammar as `netgov claim set`, so the CLI and the dashboard cannot drift
@@ -2003,7 +2003,7 @@ func honestMACBaseline(cur string, cl *Claim, dev string) string {
 	return cur
 }
 
-// unescapeNM strips nmcli's terse-output backslash escaping (`4A\:21\:…`), which otherwise makes a
+// unescapeNM strips nmcli's terse-output backslash escaping (`02\:00\:5E\:…`), which otherwise makes a
 // MAC compare unequal to itself.
 func unescapeNM(s string) string { return strings.ReplaceAll(s, `\`, "") }
 
@@ -2028,7 +2028,7 @@ func applyMACOps(cl *Claim, ops []macOp) []string {
 		}
 		// Record the pre-netgov value ONCE so `reset` restores it (nmprops.go rules apply) — but
 		// NEVER record a value netgov itself could have written. See honestMACBaseline: found on
-		// .153, 2026-08-15, with `4A:21:0B:6E:06:85` — netgov's own parked MAC — sitting in
+		// .153, 2026-08-15, with `02:00:5E:00:53:01` — netgov's own parked MAC — sitting in
 		// state.json as eth-lan's "original".
 		if st := loadState(statePath()); st != nil {
 			if curv, ok := nmGet(prof, key); ok {

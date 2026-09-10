@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+# artefact-version: netgov-publish-gate/1.0
+"""Publish gate for netgov — refuse anything that names the network it was written on.
+
+This repository is PUBLIC. The tool is meant to be shared; the network it was developed
+against is not. That split is the whole rule, and it cannot rest on someone remembering it
+while pasting a fixture at 01:00.
+
+WHY THIS IS NOT THE mgz-tools GATE, though it started as a copy of it (thanks, c-019):
+
+  netgov is a LAN policy-routing tool. Private addresses, MACs and SSIDs are its SUBJECT
+  MATTER — every doc and half the tests must contain them. A gate that refuses private
+  addresses outright would refuse every honest commit, get bypassed within a day, and then
+  be worse than nothing: it would look like coverage. ⇒ this gate does the inverse. It
+  ALLOWS a small, explicit set of documentation values and refuses every other address,
+  MAC or hostname of the shapes we care about. Adding a new example means adding it here,
+  in one visible line, which is the point.
+
+THE AXES, and the one that earned this file:
+
+  · IPv4 — anything private-range that is not in ALLOW_V4. Our LAN is 192.168.222.0/24;
+    the fixtures now say 10.0.0.0/24.
+  · IPv6 — any global-unicast address (2000::/3) outside 2001:db8::/32, and any ULA
+    outside fd00:db8::/32. ⭐ THIS IS THE ONE THAT MATTERED. Until 2026-09-10 the tests
+    carried `2a01:599:a1b:2c00::/64` — a REAL, GLOBALLY ROUTABLE prefix from a residential
+    ISP, with the host's actual interface identifiers, sitting in a public repo. It was
+    invisible to a review that searched for private ranges, because it is not one. A
+    global address is the opposite of RFC1918: it is the case where publishing the map
+    also publishes the territory.
+  · MAC — anything outside the RFC 7042 documentation range 00:00:5E:00:53:xx (and its
+    locally-administered twin 02:00:5E:00:53:xx, which the parked-MAC examples need), plus
+    a couple of visibly-fake ones. A real `ip -j addr` paste always carries a real MAC, so
+    this axis catches the paste even when the addresses look innocent.
+  · NAMES — our hosts, SSIDs and domains, in words rather than numbers.
+  · CREDENTIAL BY CONTEXT — a value is a credential because of the NAME in front of it,
+    however weak. A memorable WPA2 passphrase is low-entropy by construction; that is the
+    point of it, and an entropy scan reads it as prose. (Two PSKs once sat in a private
+    history for three weeks past an entropy-only guard.)
+
+FAILS CLOSED. Any error while scanning refuses the commit. A guard that silently does not
+run manufactures confidence, which is worse than no guard.
+
+Install:  git config core.hooksPath .githooks
+Bypass:   git commit --no-verify   (inherent to git; this guards against accident)
+"""
+import ipaddress
+import re
+import subprocess
+import sys
+
+VERSION = "netgov-publish-gate/1.0"
+if "--version" in sys.argv:
+    print(VERSION)
+    sys.exit(0)
+
+# ---------------------------------------------------------------- allowlists --
+# Documentation values. Everything of these shapes that is NOT here is refused.
+ALLOW_V4_NETS = [ipaddress.ip_network(n) for n in (
+    "10.0.0.0/24",       # the generic LAN the fixtures and docs use
+    "10.99.99.0/24",     # "a device that does not exist" in the claim tests
+    "172.16.0.0/16", "172.18.0.0/16", "172.20.0.0/16",   # container-subnet examples
+    "192.168.0.0/24",    # a generic "some other LAN" in the docs
+)]
+ALLOW_V6_NETS = [ipaddress.ip_network(n) for n in (
+    "2001:db8::/32",     # RFC 3849 documentation prefix
+    "fd00:db8::/32",     # our ULA-shaped documentation prefix
+    # Public anycast resolvers the tool PINGS. These are global on purpose and belong in
+    # the code: they are a well-known service, not a machine of ours. Caught as a false
+    # positive on this gate's own first run, which is the right way to find the line.
+    "2606:4700:4700::/48",   # Cloudflare DNS — the v6 reachability probe target
+    "2620:fe::/48",          # Quad9, if a probe ever moves there
+)]
+ALLOW_MAC = re.compile(
+    r"^(?:00|02):00:5e:00:53:[0-9a-f]{2}$"   # RFC 7042 doc range + its LA twin
+    r"|^02:11:22:33:44:55$|^11:22:33:44:55:66$|^aa:bb:cc:dd:ee:ff$", re.I)
+
+# ------------------------------------------------------------------- scanners --
+RX_V4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+RX_V6 = re.compile(r"\b(?:[0-9a-f]{1,4}:){2,7}(?::|[0-9a-f]{1,4})(?:::)?[0-9a-f:]*\b", re.I)
+# nmcli's terse output escapes the separator (`4A\:21\:0B\:…`), so the backslash is
+# OPTIONAL, not an alternative separator. Written the other way this pattern misses every
+# escaped MAC — which is exactly the form that slipped past a hand-written grep on
+# 2026-09-10, twice, before a mutation test caught it here.
+RX_MAC = re.compile(r"\b(?:[0-9a-f]{2}\\?[:-]){5}[0-9a-f]{2}\b", re.I)
+
+RX_NAMES = [
+    (re.compile(r"\b(ms-rosy|msrosy|nuc-server|pm-NUC\w*|pm-P2-MAX|pear-windows|"
+                r"hky-admin\w*|timeline-replica|proxy-[ab])\b", re.I),
+     "one of our hostnames — a map is what a stranger lacks"),
+    (re.compile(r"\b(CNNet|TowerNet|Motionlab\w*|CIC-2\.4|CIC-Encrypted|Vodafone-\d+)\b", re.I),
+     "one of our SSIDs — it names a place as well as a network"),
+    (re.compile(r"\b(mgzllc\.com|station188|hmwizard\.com|italian-bakery-gz|"
+                r"mincuzzi\.(asia|cn)|tagtm\.org)\b", re.I),
+     "an internal, cover or personal domain of ours"),
+    (re.compile(r"\bcdn-[0-9a-f]{8}\b", re.I),
+     "a discovery-channel hostname — that channel works by not being enumerable"),
+    (re.compile(r"""\b(psk|passwd|password|passphrase|secret|token|api[_-]?key)\b\s*[:=]\s*["']?[A-Za-z0-9._@/+-]{6,}""", re.I),
+     "a value named as a credential — the label makes it one, whatever its entropy"),
+]
+
+# This file quotes what it blocks, so scanning it would always refuse. The exemption is
+# named here rather than hidden in a weaker pattern.
+EXEMPT = {".githooks/pre-commit"}
+
+
+def bad_v4(text):
+    for m in RX_V4.finditer(text):
+        try:
+            a = ipaddress.ip_address(m.group(0))
+        except ValueError:
+            continue
+        if not a.is_private or a.is_loopback or a.is_link_local:
+            continue                       # public/loopback/APIPA: not our map
+        if any(a in n for n in ALLOW_V4_NETS):
+            continue
+        return m, "a private address outside the documentation ranges this repo uses"
+    return None, ""
+
+
+def bad_v6(text):
+    for m in RX_V6.finditer(text):
+        s = m.group(0).rstrip(":")
+        if s.count(":") < 2:
+            continue
+        try:
+            a = ipaddress.ip_address(s)
+        except ValueError:
+            continue
+        if a.is_loopback or a.is_link_local or a.is_multicast or a.is_unspecified:
+            continue
+        if any(a in n for n in ALLOW_V6_NETS):
+            continue
+        if a.is_global:
+            return m, ("a GLOBALLY ROUTABLE IPv6 address — unlike RFC1918 this is reachable, "
+                       "and it names an ISP, a country and a machine")
+        if a.is_private:
+            return m, "a ULA outside the documentation prefix this repo uses"
+    return None, ""
+
+
+def bad_mac(text):
+    for m in RX_MAC.finditer(text):
+        if not ALLOW_MAC.match(m.group(0).replace("\\", "").replace("-", ":")):
+            return m, ("a MAC outside RFC 7042's documentation range — real hardware, and the "
+                       "tell-tale of a pasted `ip`/`nmcli` capture")
+    return None, ""
+
+
+def staged_files():
+    out = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM", "-z"],
+        capture_output=True, check=True, text=True).stdout
+    return [f for f in out.split("\0") if f and f not in EXEMPT]
+
+
+findings = []
+try:
+    for path in staged_files():
+        raw = subprocess.run(["git", "show", f":{path}"],
+                             capture_output=True, check=True).stdout
+        if b"\0" in raw[:8000]:
+            continue                       # binary: nothing text-shaped to find
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        hit = None
+        for scan in (bad_v4, bad_v6, bad_mac):
+            m, why = scan(text)
+            if m:
+                hit = (m, why)
+                break
+        if not hit:
+            for rx, why in RX_NAMES:
+                m = rx.search(text)
+                if m:
+                    hit = (m, why)
+                    break
+        if hit:
+            m, why = hit
+            findings.append((f"{path}:{text[:m.start()].count(chr(10)) + 1}",
+                             m.group(0)[:40], why))
+except Exception as e:                     # FAIL CLOSED — never pass on our own error
+    print(f"{VERSION}: FAILED TO COMPLETE ({e.__class__.__name__}: {e})", file=sys.stderr)
+    print("Refusing the commit. A guard that cannot run must not look like a clean scan.",
+          file=sys.stderr)
+    sys.exit(1)
+
+if findings:
+    print("\n✗ COMMIT REFUSED — this repository is PUBLIC and the staged content names "
+          "the network it was written on:\n", file=sys.stderr)
+    for where, snippet, why in findings:
+        print(f"  {where}\n      found: {snippet!r}\n      why:   {why}\n", file=sys.stderr)
+    print("Use a generic value instead — the fixtures use 10.0.0.0/24, 2001:db8::/32 and",
+          file=sys.stderr)
+    print("00:00:5E:00:53:xx. If the example is genuinely new, add it to the allowlist at",
+          file=sys.stderr)
+    print("the top of .githooks/pre-commit, where the exception stays visible.\n", file=sys.stderr)
+    sys.exit(1)
+
+sys.exit(0)

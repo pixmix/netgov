@@ -220,7 +220,7 @@ import (
 // same thing whether the failure was harmless or total.
 //
 // 2.30 is a production incident, and it is netgov's own fault. c-001 ran the authorised failover
-// test on ms-rosy and netgov took .186 off the air for 8.5 MINUTES (n-283). Three defects, each
+// test on host-b and netgov took .186 off the air for 8.5 MINUTES (n-283). Three defects, each
 // one a rule this file states elsewhere and did not follow here:
 //
 //  1. THE ABORT INFERRED FROM AN EXIT CODE, twenty lines above a comment saying "Verify the
@@ -267,7 +267,7 @@ import (
 // 2.32 closes the oldest open bug in this file — the v6 "no internet" badge on a working uplink,
 // found 2026-07-05 and left pending for five weeks. The reason it survived is the point: this box
 // has had no global IPv6 the whole time, so nothing available here could reproduce it. It was seen
-// once, on a German Vodafone line, and then became invisible to every observation on the machine
+// once, on a residential ISP line elsewhere, and became invisible to every observation on the machine
 // where the fix would be written. That is what tests are for, and there were none.
 //
 // CAUSE. IPv6 privacy extensions (RFC 4941) put a STABLE address and a rotating TEMPORARY address
@@ -860,7 +860,7 @@ func defaultGW(dev, fam string) string {
 //
 // It asks the ADDRESS first, and that ordering is the whole fix (2.29). Measured on .153:
 //
-//	! ip route add default via 192.168.222.1 dev enp114s0 table 100 -> Error: Nexthop has invalid gateway.
+//	! ip route add default via 10.0.0.1 dev enp114s0 table 100 -> Error: Nexthop has invalid gateway.
 //	netgov: applied (13 cmds, 1 errors)
 //
 // 13 commands, not 14 — the on-link route was silently skipped, which is what made the default
@@ -927,7 +927,7 @@ func parseLinkNet(jsonOut, fam string) string {
 			if fam == "6" && strings.HasPrefix(strings.ToLower(ai.Local), "fd") {
 				continue
 			}
-			// Mask to the network. `192.168.222.153/24` as a destination would install a /32-ish
+			// Mask to the network. `10.0.0.10/24` as a destination would install a /32-ish
 			// host route in disguise; the gateway must be covered by the PREFIX for the default
 			// added next to resolve.
 			_, netw, err := net.ParseCIDR(ai.Local + "/" + itoa(ai.PrefixLen))

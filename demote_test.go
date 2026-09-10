@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// The defect this file guards (c-001, ms-rosy 2026-08-16): the arbiter rejected a leg measuring
+// The defect this file guards (c-001, host-b 2026-08-16): the arbiter rejected a leg measuring
 // 70-100% frame loss, and that leg kept the preferred ipv4.route-metric — so the box held .186 on a
 // healthy adapter while sourcing its traffic from the broken one. Every assertion here is about the
 // metric FOLLOWING THE VERDICT rather than the declared priority.
@@ -190,7 +190,7 @@ func TestRecordDemotions_IsDeterministic(t *testing.T) {
 	}
 }
 
-// TestStaleEvidenceWarning pins the signal whose absence cost ms-rosy its LAN on 2026-08-30
+// TestStaleEvidenceWarning pins the signal whose absence cost host-b its LAN on 2026-08-30
 // (n-649). The metric comparison in uplinkRoutingVerify CANNOT catch this case — with the record
 // aged out netgov wants the priority-only ranking and the kernel matches it exactly — so this
 // warning is the only thing standing between a silently un-consulted verdict and a black-holed box.
@@ -202,7 +202,7 @@ func TestStaleEvidenceWarning(t *testing.T) {
 		fresh     bool
 		want      bool
 	}{
-		{"the ms-rosy case: managed, two legs, evidence aged out", true, 2, false, true},
+		{"the host-b case: managed, two legs, evidence aged out", true, 2, false, true},
 		{"fresh evidence says nothing", true, 2, true, false},
 		{"metrics unmanaged: netgov holds no opinion to be stale", false, 2, false, false},
 		{"one claimant: nothing to rank, so no degradation to warn about", true, 1, false, false},
@@ -244,7 +244,7 @@ func TestStaleEvidenceFailsOpenToPriority(t *testing.T) {
 func TestDemotedHolderAlternative(t *testing.T) {
 	cs := []Claimant{{Dev: "eno1", Priority: 100}, {Dev: "wlp0s20f3", Priority: 50}}
 
-	// The ms-rosy case: the holder is demoted and the other leg works => move.
+	// The host-b case: the holder is demoted and the other leg works => move.
 	alt, ok := demotedHolderAlternative("eno1", cs, map[string]bool{"eno1": true})
 	if !ok || alt != "wlp0s20f3" {
 		t.Fatalf("demoted holder with an eligible peer must move: got %q ok=%v", alt, ok)

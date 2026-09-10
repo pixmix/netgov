@@ -38,22 +38,22 @@ func contains(s, sub string) bool {
 // The condition c-019 measured on .153 on 2026-08-14: the arbiter is correct, the holder is
 // correct, and the host talks on the other adapter as a different address.
 func TestPathLines_ReportsSplitWhenHolderIsNotThePath(t *testing.T) {
-	got := pathLines("192.168.222.153", "enp114s0", pathObs{
-		Gateway:  "192.168.222.1",
+	got := pathLines("10.0.0.10", "enp114s0", pathObs{
+		Gateway:  "10.0.0.1",
 		OnDev:    "wlo1",
-		OnSrc:    "192.168.222.238",
+		OnSrc:    "10.0.0.120",
 		OffDev:   "wlo1",
-		OffSrc:   "192.168.222.238",
+		OffSrc:   "10.0.0.120",
 		BoundDev: "wlo1",
 	})
 	if !has(t, got, "HOLDS is not PATH") {
 		t.Fatalf("a holder that is not the path must be reported; got %q", got)
 	}
 	// The consequence has to be checkable from the OTHER end, or it is not actionable.
-	if !has(t, got, "peers see 192.168.222.238, not 192.168.222.153") {
+	if !has(t, got, "peers see 10.0.0.120, not 10.0.0.10") {
 		t.Errorf("the warning must name the address peers actually see; got %q", got)
 	}
-	if !has(t, got, "bound to 192.168.222.153") {
+	if !has(t, got, "bound to 10.0.0.10") {
 		t.Errorf("must say the bound-socket path still works, or this reads as 'address unusable'; got %q", got)
 	}
 }
@@ -61,12 +61,12 @@ func TestPathLines_ReportsSplitWhenHolderIsNotThePath(t *testing.T) {
 // The healthy case must NOT warn — a report that cries wolf on every box teaches operators to
 // skip it, which costs more than never having written it.
 func TestPathLines_SilentWhenHolderIsThePath(t *testing.T) {
-	got := pathLines("192.168.222.153", "enp114s0", pathObs{
-		Gateway: "192.168.222.1",
+	got := pathLines("10.0.0.10", "enp114s0", pathObs{
+		Gateway: "10.0.0.1",
 		OnDev:   "enp114s0",
-		OnSrc:   "192.168.222.153",
+		OnSrc:   "10.0.0.10",
 		OffDev:  "enp114s0",
-		OffSrc:  "192.168.222.153",
+		OffSrc:  "10.0.0.10",
 	})
 	if has(t, got, "HOLDS is not PATH") {
 		t.Fatalf("must not warn when the holder IS the path; got %q", got)
@@ -81,12 +81,12 @@ func TestPathLines_SilentWhenHolderIsThePath(t *testing.T) {
 // session's internet lifeline. Warning about it would be the tool second-guessing a policy it
 // knows nothing about.
 func TestPathLines_OffLinkDifferenceAloneIsNotAFinding(t *testing.T) {
-	got := pathLines("192.168.222.153", "enp114s0", pathObs{
-		Gateway: "192.168.222.1",
+	got := pathLines("10.0.0.10", "enp114s0", pathObs{
+		Gateway: "10.0.0.1",
 		OnDev:   "enp114s0",
-		OnSrc:   "192.168.222.153",
+		OnSrc:   "10.0.0.10",
 		OffDev:  "wlo1", // internet leaves via wifi ON PURPOSE
-		OffSrc:  "192.168.222.238",
+		OffSrc:  "10.0.0.120",
 	})
 	if has(t, got, "HOLDS is not PATH") {
 		t.Fatalf("a deliberate never-default wired leg must not be reported as a split; got %q", got)
@@ -96,7 +96,7 @@ func TestPathLines_OffLinkDifferenceAloneIsNotAFinding(t *testing.T) {
 // Losing the ability to measure is not evidence of a fault — invariant 4, the same rule the
 // gateway probe follows when arping is missing.
 func TestPathLines_UnmeasurableIsNotAFinding(t *testing.T) {
-	got := pathLines("192.168.222.153", "enp114s0", pathObs{Gateway: "192.168.222.1"})
+	got := pathLines("10.0.0.10", "enp114s0", pathObs{Gateway: "10.0.0.1"})
 	if has(t, got, "HOLDS is not PATH") {
 		t.Fatalf("no route answer must not produce a verdict; got %q", got)
 	}
@@ -109,13 +109,13 @@ func TestPathLines_UnmeasurableIsNotAFinding(t *testing.T) {
 // 2.28: this is now specifically the LEASE-ARBITRATION case (no identity MAC declared), where it
 // remains true. The identity-MAC case is the two tests further down, and it is the opposite.
 func TestPathLines_StandbyOnGuardedSubnetIsReportedEvenWhenPathIsCorrect(t *testing.T) {
-	got := pathLines("192.168.222.153", "enp114s0", pathObs{
-		Gateway: "192.168.222.1",
+	got := pathLines("10.0.0.10", "enp114s0", pathObs{
+		Gateway: "10.0.0.1",
 		OnDev:   "enp114s0",
-		OnSrc:   "192.168.222.153",
-		Extra:   []string{"wlo1 192.168.222.239"},
+		OnSrc:   "10.0.0.10",
+		Extra:   []string{"wlo1 10.0.0.121"},
 	})
-	if !has(t, got, "standby on the guarded subnet: wlo1 192.168.222.239") {
+	if !has(t, got, "standby on the guarded subnet: wlo1 10.0.0.121") {
 		t.Fatalf("a standby holding its own address on the guarded subnet must be reported; got %q", got)
 	}
 	if has(t, got, "HOLDS is not PATH") {
@@ -129,16 +129,16 @@ func TestPathLines_StandbyOnGuardedSubnetIsReportedEvenWhenPathIsCorrect(t *test
 // verified by running the tool, because on a healthy box "no output" is also what a broken check
 // produces.
 func TestPathLines_IdentityModeDoesNotWarnAboutTheDesign(t *testing.T) {
-	got := pathLines("192.168.222.153", "enp114s0", pathObs{
-		Gateway:  "192.168.222.1",
+	got := pathLines("10.0.0.10", "enp114s0", pathObs{
+		Gateway:  "10.0.0.1",
 		OnDev:    "enp114s0",
-		OnSrc:    "192.168.222.153",
-		Extra:    []string{"wlo1 192.168.222.154"}, // the standby's OWN reservation: intended
-		Identity: "48:21:0b:6e:06:85",
+		OnSrc:    "10.0.0.10",
+		Extra:    []string{"wlo1 10.0.0.11"}, // the standby's OWN reservation: intended
+		Identity: "00:00:5e:00:53:01",
 		Holders:  []string{"enp114s0"},
 		MACs: []macFact{
-			{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
-			{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: "98:bd:80:ec:68:cd"},
+			{Dev: "enp114s0", Cur: "00:00:5e:00:53:01", Perm: "00:00:5e:00:53:01"},
+			{Dev: "wlo1", Cur: "00:00:5e:00:53:02", Perm: "00:00:5e:00:53:02"},
 		},
 	})
 	for _, l := range got {
@@ -157,28 +157,28 @@ func TestPathLines_IdentityModeWarnsOnTheConditionsThatActuallyBreakIt(t *testin
 		want string
 	}{
 		{"two adapters on one MAC — what parked MACs exist to prevent",
-			pathObs{Identity: "48:21:0b:6e:06:85", MACs: []macFact{
-				{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
-				{Dev: "wlo1", Cur: "48:21:0b:6e:06:85", Perm: "98:bd:80:ec:68:cd"},
+			pathObs{Identity: "00:00:5e:00:53:01", MACs: []macFact{
+				{Dev: "enp114s0", Cur: "00:00:5e:00:53:01", Perm: "00:00:5e:00:53:01"},
+				{Dev: "wlo1", Cur: "00:00:5e:00:53:01", Perm: "00:00:5e:00:53:02"},
 			}}, "MAC COLLISION"},
 		{"the identity is on neither leg, so the reservation points off-host",
-			pathObs{Identity: "48:21:0b:6e:06:85", MACs: []macFact{
-				{Dev: "enp114s0", Cur: "4a:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
-				{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: "98:bd:80:ec:68:cd"},
+			pathObs{Identity: "00:00:5e:00:53:01", MACs: []macFact{
+				{Dev: "enp114s0", Cur: "02:00:5e:00:53:01", Perm: "00:00:5e:00:53:01"},
+				{Dev: "wlo1", Cur: "00:00:5e:00:53:02", Perm: "00:00:5e:00:53:02"},
 			}}, "worn by NO claimant"},
 		{"a standby on a MAC netgov never sets — half-applied swap or a foreign clone",
-			pathObs{Identity: "48:21:0b:6e:06:85", MACs: []macFact{
-				{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
-				{Dev: "wlo1", Cur: "02:11:22:33:44:55", Perm: "98:bd:80:ec:68:cd"},
+			pathObs{Identity: "00:00:5e:00:53:01", MACs: []macFact{
+				{Dev: "enp114s0", Cur: "00:00:5e:00:53:01", Perm: "00:00:5e:00:53:01"},
+				{Dev: "wlo1", Cur: "02:11:22:33:44:55", Perm: "00:00:5e:00:53:02"},
 			}}, "netgov did not put it there"},
 		{"unreadable permanent MAC is a finding, because the planner REFUSES on it",
-			pathObs{Identity: "48:21:0b:6e:06:85", MACs: []macFact{
-				{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
-				{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: ""},
+			pathObs{Identity: "00:00:5e:00:53:01", MACs: []macFact{
+				{Dev: "enp114s0", Cur: "00:00:5e:00:53:01", Perm: "00:00:5e:00:53:01"},
+				{Dev: "wlo1", Cur: "00:00:5e:00:53:02", Perm: ""},
 			}}, "permanent MAC unknown"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := pathLines("192.168.222.153", "enp114s0", c.o); !has(t, got, c.want) {
+			if got := pathLines("10.0.0.10", "enp114s0", c.o); !has(t, got, c.want) {
 				t.Fatalf("want %q; got %q", c.want, got)
 			}
 		})
@@ -189,11 +189,11 @@ func TestPathLines_IdentityModeWarnsOnTheConditionsThatActuallyBreakIt(t *testin
 // itself the identity has nowhere else to go. Flagging it would recreate the always-on warning in
 // a new costume on exactly the boxes that use the mechanism hardest.
 func TestPathLines_ParkedStandbyIsNotAHazard(t *testing.T) {
-	got := pathLines("192.168.222.153", "wlo1", pathObs{
-		Identity: "98:bd:80:ec:68:cd",
+	got := pathLines("10.0.0.10", "wlo1", pathObs{
+		Identity: "00:00:5e:00:53:02",
 		MACs: []macFact{
-			{Dev: "enp114s0", Cur: "4a:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
-			{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: "98:bd:80:ec:68:cd"},
+			{Dev: "enp114s0", Cur: "02:00:5e:00:53:01", Perm: "00:00:5e:00:53:01"},
+			{Dev: "wlo1", Cur: "00:00:5e:00:53:02", Perm: "00:00:5e:00:53:02"},
 		},
 	})
 	for _, l := range got {
@@ -206,15 +206,15 @@ func TestPathLines_ParkedStandbyIsNotAHazard(t *testing.T) {
 // Extra excludes the guarded address by construction, so NOTHING was watching for the one state
 // that is a fault under both mechanisms. Assert it under identity mode, where the old line is gone.
 func TestPathLines_TwoLegsHoldingTheGuardedAddressIsAlwaysAFault(t *testing.T) {
-	got := pathLines("192.168.222.153", "enp114s0", pathObs{
-		Gateway:  "192.168.222.1",
+	got := pathLines("10.0.0.10", "enp114s0", pathObs{
+		Gateway:  "10.0.0.1",
 		OnDev:    "enp114s0",
-		OnSrc:    "192.168.222.153",
-		Identity: "48:21:0b:6e:06:85",
+		OnSrc:    "10.0.0.10",
+		Identity: "00:00:5e:00:53:01",
 		Holders:  []string{"enp114s0", "wlo1"},
 		MACs: []macFact{
-			{Dev: "enp114s0", Cur: "48:21:0b:6e:06:85", Perm: "48:21:0b:6e:06:85"},
-			{Dev: "wlo1", Cur: "98:bd:80:ec:68:cd", Perm: "98:bd:80:ec:68:cd"},
+			{Dev: "enp114s0", Cur: "00:00:5e:00:53:01", Perm: "00:00:5e:00:53:01"},
+			{Dev: "wlo1", Cur: "00:00:5e:00:53:02", Perm: "00:00:5e:00:53:02"},
 		},
 	})
 	if !has(t, got, "SPLIT-BRAIN: enp114s0 and wlo1") {
@@ -226,9 +226,9 @@ func TestRouteGetParse(t *testing.T) {
 	// `ip route get X from Y` echoes the pin and prints NO src. Reporting an empty source there
 	// would read as "no source address", which is a different and alarming claim.
 	for _, c := range []struct{ out, from, dev, src string }{
-		{"192.168.222.1 dev wlo1 src 192.168.222.238 uid 1000", "", "wlo1", "192.168.222.238"},
-		{"1.1.1.1 via 192.168.222.1 dev wlo1 src 192.168.222.238 uid 1000", "", "wlo1", "192.168.222.238"},
-		{"1.1.1.1 from 192.168.222.153 via 192.168.222.1 dev enp114s0 table 100 uid 1000", "192.168.222.153", "enp114s0", "192.168.222.153"},
+		{"10.0.0.1 dev wlo1 src 10.0.0.120 uid 1000", "", "wlo1", "10.0.0.120"},
+		{"1.1.1.1 via 10.0.0.1 dev wlo1 src 10.0.0.120 uid 1000", "", "wlo1", "10.0.0.120"},
+		{"1.1.1.1 from 10.0.0.10 via 10.0.0.1 dev enp114s0 table 100 uid 1000", "10.0.0.10", "enp114s0", "10.0.0.10"},
 	} {
 		dev, src := parseRouteGet(c.out, c.from)
 		if dev != c.dev || src != c.src {
@@ -243,8 +243,8 @@ func TestRouteGetParse(t *testing.T) {
 // you cannot check by watching a healthy box, because a healthy box never enters the state.
 
 func claimOf(holderHasAddr string) *Claim {
-	return &Claim{Address: "192.168.222.186", Claimants: []Claimant{
-		{Dev: "eno1", Priority: 100}, {Dev: "wlp0s20f3", SSIDs: []string{"CNNet"}, Priority: 50}}}
+	return &Claim{Address: "10.0.0.20", Claimants: []Claimant{
+		{Dev: "eno1", Priority: 100}, {Dev: "wlp0s20f3", SSIDs: []string{"HomeAP"}, Priority: 50}}}
 }
 
 // Nobody holds it. This is the measured 19-minute failure and it MUST trigger a re-attempt.
@@ -285,12 +285,12 @@ func TestClaimNeedsAttention_IsAGateNotAVerdict(t *testing.T) {
 // just ours. You cannot check that by running the tool on a healthy box — it never enters the state.
 
 func macMaps() (perm, cur map[string]string) {
-	return map[string]string{"eth0": "48:21:0b:6e:06:85", "wlan0": "98:bd:80:ec:68:cd"},
-		map[string]string{"eth0": "48:21:0b:6e:06:85", "wlan0": "98:bd:80:ec:68:cd"}
+	return map[string]string{"eth0": "00:00:5e:00:53:01", "wlan0": "00:00:5e:00:53:02"},
+		map[string]string{"eth0": "00:00:5e:00:53:01", "wlan0": "00:00:5e:00:53:02"}
 }
 
 func idClaim() *Claim {
-	return &Claim{Address: "192.168.222.153", IdentityMAC: "48:21:0b:6e:06:85",
+	return &Claim{Address: "10.0.0.10", IdentityMAC: "00:00:5e:00:53:01",
 		Claimants: []Claimant{{Dev: "eth0", Priority: 100}, {Dev: "wlan0", Priority: 50}}}
 }
 
@@ -312,10 +312,10 @@ func TestClaimMACPlan_LoserReleasesBeforeWinnerClaims(t *testing.T) {
 	}
 	// The loser's PERMANENT mac IS the identity, so clearing would not release it — it must PARK.
 	// This assertion is the bug the operator caught: the original said Set == "".
-	if ops[0].Dev != "eth0" || ops[0].Set != "4a:21:0b:6e:06:85" {
+	if ops[0].Dev != "eth0" || ops[0].Set != "02:00:5e:00:53:01" {
 		t.Errorf("the FIRST op must PARK the loser off the identity (perm==identity, so clearing is a no-op); got %+v", ops[0])
 	}
-	if ops[1].Dev != "wlan0" || ops[1].Set != "48:21:0b:6e:06:85" {
+	if ops[1].Dev != "wlan0" || ops[1].Set != "00:00:5e:00:53:01" {
 		t.Errorf("the SECOND op must be the winner assuming it; got %+v", ops[1])
 	}
 }
@@ -324,8 +324,8 @@ func TestClaimMACPlan_LoserReleasesBeforeWinnerClaims(t *testing.T) {
 // clone must be CLEARED rather than pinned — a profile should carry no override it does not need.
 func TestClaimMACPlan_WinnerWithPermanentIdentityClearsRatherThanPins(t *testing.T) {
 	perm, cur := macMaps()
-	cur["wlan0"] = "48:21:0b:6e:06:85" // wifi is currently the identity
-	cur["eth0"] = "48:21:0b:6e:06:85"  // and eth0 still has its permanent one
+	cur["wlan0"] = "00:00:5e:00:53:01" // wifi is currently the identity
+	cur["eth0"] = "00:00:5e:00:53:01"  // and eth0 still has its permanent one
 	ops := claimMACPlan(idClaim(), "eth0", perm, cur)
 	if len(ops) != 1 || ops[0].Dev != "wlan0" || ops[0].Set != "" {
 		t.Fatalf("want exactly one op: wlan0 releases; got %+v", ops)
@@ -344,20 +344,20 @@ func TestClaimMACPlan_InertWithoutAnIdentityMAC(t *testing.T) {
 }
 
 func TestParseClaimForm_IdentityMAC(t *testing.T) {
-	cl, err := parseClaimForm("192.168.222.153 identity=48:21:0B:6E:06:85 enp114s0:100 wlo1:50:CNNet")
+	cl, err := parseClaimForm("10.0.0.10 identity=00:00:5E:00:53:01 enp114s0:100 wlo1:50:HomeAP")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if cl.IdentityMAC != "48:21:0b:6e:06:85" {
+	if cl.IdentityMAC != "00:00:5e:00:53:01" {
 		t.Errorf("identity MAC must be parsed and lowercased; got %q", cl.IdentityMAC)
 	}
 	if len(cl.Claimants) != 2 {
 		t.Errorf("identity= must not be consumed as a claimant; got %d claimants", len(cl.Claimants))
 	}
-	if got := claimFormString(cl); !contains(got, "identity=48:21:0b:6e:06:85") {
+	if got := claimFormString(cl); !contains(got, "identity=00:00:5e:00:53:01") {
 		t.Errorf("must round-trip through the form string; got %q", got)
 	}
-	if _, err := parseClaimForm("192.168.222.153 identity=nonsense enp114s0:100"); err == nil {
+	if _, err := parseClaimForm("10.0.0.10 identity=nonsense enp114s0:100"); err == nil {
 		t.Error("a malformed MAC must be rejected, not silently ignored")
 	}
 }
@@ -369,7 +369,7 @@ func TestClaimMACPlan_NeverLeavesTwoAdaptersOnOneMAC(t *testing.T) {
 	for _, winner := range []string{"eth0", "wlan0"} {
 		perm, cur := macMaps()
 		if winner == "eth0" {
-			cur["wlan0"] = "48:21:0b:6e:06:85" // failback: wifi currently holds the identity
+			cur["wlan0"] = "00:00:5e:00:53:01" // failback: wifi currently holds the identity
 		}
 		final := map[string]string{}
 		for d, v := range cur {
@@ -389,18 +389,18 @@ func TestClaimMACPlan_NeverLeavesTwoAdaptersOnOneMAC(t *testing.T) {
 			}
 			seen[m] = d
 		}
-		if final[winner] != "48:21:0b:6e:06:85" {
+		if final[winner] != "00:00:5e:00:53:01" {
 			t.Errorf("winner=%s must end up on the identity; got %s", winner, final[winner])
 		}
 	}
 }
 
 func TestParkedMAC_SetsLocallyAdministeredBit(t *testing.T) {
-	if got := parkedMAC("48:21:0b:6e:06:85"); got != "4a:21:0b:6e:06:85" {
-		t.Errorf("parkedMAC = %q, want 4a:21:0b:6e:06:85 (0x48|0x02 = 0x4a)", got)
+	if got := parkedMAC("00:00:5e:00:53:01"); got != "02:00:5e:00:53:01" {
+		t.Errorf("parkedMAC = %q, want 02:00:5e:00:53:01 (0x48|0x02 = 0x4a)", got)
 	}
 	// Already locally administered: must stay put rather than drift on every call.
-	if got := parkedMAC("4a:21:0b:6e:06:85"); got != "4a:21:0b:6e:06:85" {
+	if got := parkedMAC("02:00:5e:00:53:01"); got != "02:00:5e:00:53:01" {
 		t.Errorf("must be idempotent; got %q", got)
 	}
 	if got := parkedMAC("nonsense"); got != "" {
@@ -445,12 +445,12 @@ func TestFromDispatcher_RecognisesTheExplicitFlag(t *testing.T) {
 // when a profile fails to ACTIVATE, and a DHCP timeout is the expected outcome for a leg just moved
 // onto a MAC the router holds no reservation for — while the MAC itself applied fine.
 func TestMacOpAchieved_AParkedLoserWithAFailedActivationHasStillReleasedTheIdentity(t *testing.T) {
-	park := macOp{Dev: "eno1", Set: "1e:69:7a:6b:f7:c6"}
-	if !macOpAchieved(park, "1e:69:7a:6b:f7:c6", "1c:69:7a:6b:f7:c6") {
+	park := macOp{Dev: "eno1", Set: "02:00:5e:00:53:04"}
+	if !macOpAchieved(park, "02:00:5e:00:53:04", "00:00:5e:00:53:04") {
 		t.Fatal("the park landed; aborting here is what stranded .186 for 8.5 minutes")
 	}
 	// Case-insensitively, because nmcli and sysfs disagree on case.
-	if !macOpAchieved(park, "1E:69:7A:6B:F7:C6", "1c:69:7a:6b:f7:c6") {
+	if !macOpAchieved(park, "02:00:5E:00:53:04", "00:00:5e:00:53:04") {
 		t.Error("MAC comparison must be case-insensitive or every real reading fails it")
 	}
 }
@@ -459,10 +459,10 @@ func TestMacOpAchieved_AParkedLoserWithAFailedActivationHasStillReleasedTheIdent
 // business, and demanding a specific one would abort a plan that had already achieved the point.
 func TestMacOpAchieved_AClearOpOnlyHasToStopWearingTheIdentity(t *testing.T) {
 	clear := macOp{Dev: "wlo1", Set: ""}
-	if !macOpAchieved(clear, "98:bd:80:ec:68:cd", "48:21:0b:6e:06:85") {
+	if !macOpAchieved(clear, "00:00:5e:00:53:02", "00:00:5e:00:53:01") {
 		t.Error("back on its permanent MAC is a released loser")
 	}
-	if macOpAchieved(clear, "48:21:0b:6e:06:85", "48:21:0b:6e:06:85") {
+	if macOpAchieved(clear, "00:00:5e:00:53:01", "00:00:5e:00:53:01") {
 		t.Fatal("still wearing the identity is NOT released — this is the MAC-conflict case the abort exists for")
 	}
 }
@@ -471,8 +471,8 @@ func TestMacOpAchieved_AClearOpOnlyHasToStopWearingTheIdentity(t *testing.T) {
 // asymmetric: a wrong "achieved" continues a plan that may put two adapters on one MAC, while a
 // wrong "not achieved" only stops early.
 func TestMacOpAchieved_AnUnreadableMACIsNotSuccess(t *testing.T) {
-	for _, o := range []macOp{{Dev: "eno1", Set: "1e:69:7a:6b:f7:c6"}, {Dev: "eno1", Set: ""}} {
-		if macOpAchieved(o, "", "1c:69:7a:6b:f7:c6") {
+	for _, o := range []macOp{{Dev: "eno1", Set: "02:00:5e:00:53:04"}, {Dev: "eno1", Set: ""}} {
+		if macOpAchieved(o, "", "00:00:5e:00:53:04") {
 			t.Errorf("an unreadable MAC must never read as success (op Set=%q)", o.Set)
 		}
 	}
@@ -481,8 +481,8 @@ func TestMacOpAchieved_AnUnreadableMACIsNotSuccess(t *testing.T) {
 // The winner must still land on EXACTLY the identity — this is the half of the check that has to
 // stay strict, or the fix above would turn the abort into a rubber stamp.
 func TestMacOpAchieved_TheWinnerMustLandOnExactlyTheIdentity(t *testing.T) {
-	win := macOp{Dev: "wlp0s20f3", Set: "1c:69:7a:6b:f7:c6"}
-	if macOpAchieved(win, "3c:58:c2:d7:cb:8e", "1c:69:7a:6b:f7:c6") {
+	win := macOp{Dev: "wlp0s20f3", Set: "00:00:5e:00:53:04"}
+	if macOpAchieved(win, "00:00:5e:00:53:05", "00:00:5e:00:53:04") {
 		t.Fatal("a winner still on its own MAC has not taken the identity; continuing would report a move that did not happen")
 	}
 }
@@ -508,7 +508,7 @@ func TestCooldownSuppresses_NeverOutlastsTheDamageItCaused(t *testing.T) {
 	}
 }
 
-// 2026-08-15: "more than one host may be answering for 192.168.222.1" was a HYPOTHESIS printed as a
+// 2026-08-15: "more than one host may be answering for 10.0.0.1" was a HYPOTHESIS printed as a
 // finding, and it cost two contributors real time — c-001 escalated it off WATCH, and I went to the
 // router to fix a second responder that does not exist. The router was clean on every axis that
 // could produce one: a single interface holding .1, arp_ignore=1, proxy_arp=0, no relayd, no WDS,
@@ -517,24 +517,24 @@ func TestCooldownSuppresses_NeverOutlastsTheDamageItCaused(t *testing.T) {
 // Duplicate REPLIES and duplicate RESPONDERS are different findings with opposite remedies. arping
 // prints the MAC of every reply, so the tool can answer this instead of speculating.
 func TestArpingResponders_ParsesTheMACOfEveryReply(t *testing.T) {
-	const one = `ARPING 192.168.222.1 from 192.168.222.153 enp114s0
-Unicast reply from 192.168.222.1 [98:FE:54:03:BD:C4]  0.888ms
-Unicast reply from 192.168.222.1 [98:FE:54:03:BD:C4]  0.955ms
+	const one = `ARPING 10.0.0.1 from 10.0.0.10 enp114s0
+Unicast reply from 10.0.0.1 [00:00:5E:00:53:03]  0.888ms
+Unicast reply from 10.0.0.1 [00:00:5E:00:53:03]  0.955ms
 Sent 2 probes (1 broadcast(s))
 Received 3 response(s)`
-	if got := arpingResponders(one); len(got) != 1 || got[0] != "98:fe:54:03:bd:c4" {
+	if got := arpingResponders(one); len(got) != 1 || got[0] != "00:00:5e:00:53:03" {
 		t.Fatalf("one responder seen twice is ONE responder; got %v", got)
 	}
-	const two = `Unicast reply from 192.168.222.1 [98:FE:54:03:BD:C4]  0.888ms
-Unicast reply from 192.168.222.1 [00:E0:4C:68:00:37]  1.021ms`
+	const two = `Unicast reply from 10.0.0.1 [00:00:5E:00:53:03]  0.888ms
+Unicast reply from 10.0.0.1 [00:00:5E:00:53:06]  1.021ms`
 	if got := arpingResponders(two); len(got) != 2 {
 		t.Fatalf("two distinct MACs must both be reported; got %v", got)
 	}
 }
 
 func TestDuplicateVerdict_DoesNotCallARetransmissionAConflict(t *testing.T) {
-	// The measured Shenzhen case: duplicates, one responder, a congested 2.4GHz channel.
-	got := duplicateVerdict(5, "192.168.222.1", []string{"98:fe:54:03:bd:c4"})
+	// The measured field case: duplicates, one responder, a congested 2.4GHz channel.
+	got := duplicateVerdict(5, "10.0.0.1", []string{"00:00:5e:00:53:03"})
 	if contains(got, "DISTINCT HOSTS") || contains(got, "conflict") {
 		t.Fatalf("one MAC delivered twice is a link-quality signal, not an address conflict; got %q", got)
 	}
@@ -544,13 +544,13 @@ func TestDuplicateVerdict_DoesNotCallARetransmissionAConflict(t *testing.T) {
 }
 
 func TestDuplicateVerdict_StillShoutsWhenTwoHostsReallyAnswer(t *testing.T) {
-	got := duplicateVerdict(3, "192.168.222.1", []string{"98:fe:54:03:bd:c4", "00:e0:4c:68:00:37"})
+	got := duplicateVerdict(3, "10.0.0.1", []string{"00:00:5e:00:53:03", "00:00:5e:00:53:06"})
 	if !contains(got, "DISTINCT HOSTS") {
 		t.Fatalf("two responders is the condition this arbiter exists for; got %q", got)
 	}
 	// And it must not need the count arithmetic to notice — two hosts answering while sent and
 	// received happen to balance is still a conflict, and the clamp would have hidden it.
-	if got := duplicateVerdict(0, "192.168.222.1", []string{"aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"}); !contains(got, "DISTINCT HOSTS") {
+	if got := duplicateVerdict(0, "10.0.0.1", []string{"aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"}); !contains(got, "DISTINCT HOSTS") {
 		t.Fatal("a conflict with balanced counts must still be reported")
 	}
 }
@@ -558,11 +558,11 @@ func TestDuplicateVerdict_StillShoutsWhenTwoHostsReallyAnswer(t *testing.T) {
 // Unresolved must read as unresolved. Picking the scarier answer when the evidence is missing is
 // the same defect as picking the reassuring one.
 func TestDuplicateVerdict_SaysWhenItCannotTell(t *testing.T) {
-	got := duplicateVerdict(2, "192.168.222.1", nil)
+	got := duplicateVerdict(2, "10.0.0.1", nil)
 	if !contains(got, "NOT established") {
 		t.Fatalf("unparsed MACs must leave the question open; got %q", got)
 	}
-	if duplicateVerdict(0, "192.168.222.1", []string{"98:fe:54:03:bd:c4"}) != "" {
+	if duplicateVerdict(0, "10.0.0.1", []string{"00:00:5e:00:53:03"}) != "" {
 		t.Error("no duplicates and one responder is the healthy case and must add nothing")
 	}
 }

@@ -195,6 +195,12 @@ Configuration is a single JSON file at `~/.config/netgov/state.json`
 (uplink names/devices, rules, defaults, AP SSIDs); apply derives all `ip` commands
 from it.
 
+## Contributing
+
+Examples in this repository use documentation values (`10.0.0.0/24`, `2001:db8::/32`,
+`00:00:5E:00:53:xx`) rather than any real network, and a fail-closed pre-commit hook
+enforces it. See [CONTRIBUTING.md](CONTRIBUTING.md) — one `git config` line to enable.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

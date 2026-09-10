@@ -4,17 +4,17 @@ import "testing"
 
 // The 2026-07-05 bug, fixed 2026-08-15. It survived five weeks for a reason worth recording: this
 // box has had no global IPv6 in that whole time, so NOTHING on it could reproduce the case. It was
-// verified live once, on a German Vodafone line, and then became unreachable to every observation
+// verified live once, on a residential ISP line elsewhere, and then became unreachable to every observation
 // available here. That is the exact shape "only a test catches an absent one" was written for.
 //
 // Real `ip -j addr show` output, with the ULA prefix swapped for a global one. Note all three
 // coexist: a DHCPv6 /128, the rotating `temporary`, and the stable `mngtmpaddr` — the last two on
 // the SAME /64.
 const v6Addrs = `[{"ifname":"enp114s0","addr_info":[
- {"family":"inet6","local":"2a01:599:a1b:2c00::275","prefixlen":128,"scope":"global","dynamic":true,"noprefixroute":true},
- {"family":"inet6","local":"2a01:599:a1b:2c00:c055:97a:6906:8a07","prefixlen":64,"scope":"global","temporary":true,"dynamic":true},
- {"family":"inet6","local":"2a01:599:a1b:2c00:8805:48b:ecc6:f96f","prefixlen":64,"scope":"global","dynamic":true,"mngtmpaddr":true,"noprefixroute":true},
- {"family":"inet6","local":"fe80::28ec:1138:3380:275a","prefixlen":64,"scope":"link","noprefixroute":true}]}]`
+ {"family":"inet6","local":"2001:db8:0:1::10","prefixlen":128,"scope":"global","dynamic":true,"noprefixroute":true},
+ {"family":"inet6","local":"2001:db8:0:1:2222:2222:2222:2222","prefixlen":64,"scope":"global","temporary":true,"dynamic":true},
+ {"family":"inet6","local":"2001:db8:0:1:3333:3333:3333:3333","prefixlen":64,"scope":"global","dynamic":true,"mngtmpaddr":true,"noprefixroute":true},
+ {"family":"inet6","local":"fe80::1111:1111:1111:1111","prefixlen":64,"scope":"link","noprefixroute":true}]}]`
 
 // THE FIX. A rule pinned to one v6 address matches whichever address netgov happened to see first
 // and misses the other — and RFC 6724 tells applications to prefer the TEMPORARY one, so the miss
@@ -23,7 +23,7 @@ const v6Addrs = `[{"ifname":"enp114s0","addr_info":[
 // working uplink.
 func TestV6SrcPrefixes_CoversBothTheStableAndTheTemporaryAddress(t *testing.T) {
 	got := v6SrcPrefixes(v6Addrs)
-	want := map[string]bool{"2a01:599:a1b:2c00::/64": true, "2a01:599:a1b:2c00::275/128": true}
+	want := map[string]bool{"2001:db8:0:1::/64": true, "2001:db8:0:1::10/128": true}
 	for _, p := range got {
 		if !want[p] {
 			t.Errorf("unexpected prefix %q", p)
@@ -43,7 +43,7 @@ func TestV6SrcPrefixes_CoversBothTheStableAndTheTemporaryAddress(t *testing.T) {
 	// a future false alarm.
 	var covers64 bool
 	for _, p := range got {
-		if p == "2a01:599:a1b:2c00::/64" {
+		if p == "2001:db8:0:1::/64" {
 			covers64 = true
 		}
 	}
@@ -54,14 +54,14 @@ func TestV6SrcPrefixes_CoversBothTheStableAndTheTemporaryAddress(t *testing.T) {
 
 func TestV6SrcPrefixes_SkipsULAAndLinkLocalAndDedupes(t *testing.T) {
 	const ula = `[{"addr_info":[
-	 {"family":"inet6","local":"fd92:daa:d131:0:c055::1","prefixlen":64,"scope":"global","temporary":true},
+	 {"family":"inet6","local":"fd00:db8:1:0:c055::1","prefixlen":64,"scope":"global","temporary":true},
 	 {"family":"inet6","local":"fe80::1","prefixlen":64,"scope":"link"}]}]`
 	if got := v6SrcPrefixes(ula); len(got) != 0 {
 		t.Fatalf("ULA is not routable and link-local is not global; got %v", got)
 	}
 	const dup = `[{"addr_info":[
-	 {"family":"inet6","local":"2a01:599:a1b:2c00::1","prefixlen":64,"scope":"global"},
-	 {"family":"inet6","local":"2a01:599:a1b:2c00::2","prefixlen":64,"scope":"global","temporary":true}]}]`
+	 {"family":"inet6","local":"2001:db8:0:1::1","prefixlen":64,"scope":"global"},
+	 {"family":"inet6","local":"2001:db8:0:1::2","prefixlen":64,"scope":"global","temporary":true}]}]`
 	if got := v6SrcPrefixes(dup); len(got) != 1 {
 		t.Fatalf("two addresses on one prefix is ONE rule; got %v", got)
 	}
@@ -71,12 +71,12 @@ func TestV6SrcPrefixes_SkipsULAAndLinkLocalAndDedupes(t *testing.T) {
 // bound to one has an expiry date. Prefer the stable address — but never at the cost of reporting
 // nothing when only a temporary exists.
 func TestPickSrc_PrefersTheStableV6AddressOverTheRotatingOne(t *testing.T) {
-	if got := pickSrc(v6Addrs, "6"); got != "2a01:599:a1b:2c00::275" {
+	if got := pickSrc(v6Addrs, "6"); got != "2001:db8:0:1::10" {
 		t.Fatalf("want the first stable global (the DHCPv6 /128 here), got %q", got)
 	}
 	const tempOnly = `[{"addr_info":[
-	 {"family":"inet6","local":"2a01:599:a1b:2c00:c055::9","prefixlen":64,"scope":"global","temporary":true}]}]`
-	if got := pickSrc(tempOnly, "6"); got != "2a01:599:a1b:2c00:c055::9" {
+	 {"family":"inet6","local":"2001:db8:0:1:2222::9","prefixlen":64,"scope":"global","temporary":true}]}]`
+	if got := pickSrc(tempOnly, "6"); got != "2001:db8:0:1:2222::9" {
 		t.Fatalf("a temporary address is usable and beats reporting nothing; got %q", got)
 	}
 }
@@ -85,9 +85,9 @@ func TestPickSrc_PrefersTheStableV6AddressOverTheRotatingOne(t *testing.T) {
 // fault. Skip it in both families.
 func TestPickSrc_SkipsDeprecated(t *testing.T) {
 	const dep = `[{"addr_info":[
-	 {"family":"inet","local":"192.168.222.9","prefixlen":24,"scope":"global","deprecated":true},
-	 {"family":"inet","local":"192.168.222.153","prefixlen":24,"scope":"global"}]}]`
-	if got := pickSrc(dep, "4"); got != "192.168.222.153" {
+	 {"family":"inet","local":"10.0.0.9","prefixlen":24,"scope":"global","deprecated":true},
+	 {"family":"inet","local":"10.0.0.10","prefixlen":24,"scope":"global"}]}]`
+	if got := pickSrc(dep, "4"); got != "10.0.0.10" {
 		t.Fatalf("want the live address, got %q", got)
 	}
 }

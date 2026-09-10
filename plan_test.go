@@ -6,7 +6,7 @@ import "testing"
 //
 // Measured on .153, 2026-08-15 03:44, in the dispatcher log:
 //
-//	! ip route add default via 192.168.222.1 dev enp114s0 table 100 -> Error: Nexthop has invalid gateway.
+//	! ip route add default via 10.0.0.1 dev enp114s0 table 100 -> Error: Nexthop has invalid gateway.
 //	netgov: applied (13 cmds, 1 errors)
 //
 // Thirteen, not fourteen: the on-link route was skipped because linkNet asked the ROUTE table for a
@@ -16,12 +16,12 @@ import "testing"
 // observation the caller already made.
 func TestParseLinkNet_DerivesThePrefixFromTheAddressNotTheRouteTable(t *testing.T) {
 	const out = `[{"ifname":"enp114s0","addr_info":[
-		{"family":"inet","local":"192.168.222.153","prefixlen":24,"scope":"global"}]}]`
+		{"family":"inet","local":"10.0.0.10","prefixlen":24,"scope":"global"}]}]`
 	got := parseLinkNet(out, "4")
-	// Masked to the NETWORK. The unmasked 192.168.222.153/24 as a destination would not cover the
+	// Masked to the NETWORK. The unmasked 10.0.0.10/24 as a destination would not cover the
 	// gateway the way the default route added next needs it to.
-	if got != "192.168.222.0/24" {
-		t.Fatalf("want the masked prefix 192.168.222.0/24, got %q", got)
+	if got != "10.0.0.0/24" {
+		t.Fatalf("want the masked prefix 10.0.0.0/24, got %q", got)
 	}
 }
 
@@ -52,10 +52,10 @@ func TestParseLinkNet_IgnoresWhatItCannotUse(t *testing.T) {
 // harmless or total, which is what makes it ignorable. Assert the wording names what stopped
 // working and how to check it, because arranging the real failure means breaking a live link.
 func TestTableGapLine_NamesTheConsequenceNotTheCount(t *testing.T) {
-	got := tableGapLine("cable", "192.168.222.153", 100, "4")
+	got := tableGapLine("cable", "10.0.0.10", 100, "4")
 	for _, want := range []string{
 		"table 100 has NO default",              // the state
-		"from 192.168.222.153 table 100",        // the rule that makes it matter
+		"from 10.0.0.10 table 100",        // the rule that makes it matter
 		"falls through to main and still works", // why nobody notices
 		"NOT in effect",                         // the actual loss
 		"netgov apply",                          // the remedy

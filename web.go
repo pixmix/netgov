@@ -222,7 +222,7 @@ func buildView() stateView {
 	for _, a := range st.APs {
 		v.APs = append(v.APs, apView{Name: a.Name, Dev: a.Dev, SSID: a.SSID, Band: a.Band, On: a.On, Active: apActive(a.Dev) == "up"})
 	}
-	// A nil slice marshals as JSON `null`, not `[]`. That is how ms-rosy's uplink-less dashboard
+	// A nil slice marshals as JSON `null`, not `[]`. That is how host-b's uplink-less dashboard
 	// died: ulOpts() mapped over a null uplinks array, threw, and every render step AFTER it never
 	// ran — the patterns table, the claim badge, and the version badge the operator had asked
 	// about four times. One box configured for pure arbitration (no uplinks, by our own design)
@@ -881,7 +881,7 @@ small{color:var(--mut)}
 
 <section><h2>Access points — named definitions (a pattern picks one by name)</h2>
 <table id="at"><thead><tr><th>name</th><th>radio</th><th>SSID</th><th>band</th><th>state</th><th></th></tr></thead><tbody></tbody></table>
-<div class="row"><input id="apn" placeholder="name e.g. CNNet" size="10"><select id="aif" title="Wi-Fi radio"></select>
+<div class="row"><input id="apn" placeholder="name e.g. HomeAP" size="10"><select id="aif" title="Wi-Fi radio"></select>
 <input id="assid" placeholder="SSID" size="12"><input id="apsk" placeholder="passphrase (≥8)" size="14">
 <select id="aband"><option value="bg">2.4GHz</option><option value="a">5GHz</option></select>
 <button onclick="apSave()">save</button></div>
@@ -915,10 +915,10 @@ small{color:var(--mut)}
 <input id="pn" placeholder="name" size="8"><input id="pp" placeholder="prio" size="4" value="50">
 <span class="mut">v4</span><select id="pv4"></select><span class="mut">v6</span><select id="pv6"></select>
 <span class="mut">require up</span><select id="prq" multiple size="2" style="min-width:74px" title="uplinks that must be UP"></select>
-<span class="mut">SSID</span><input id="pssid" placeholder="e.g. Motionlab-Member" size="17"><span class="mut">on</span><select id="pssidif" title="Wi-Fi uplink to scan"></select>
+<span class="mut">SSID</span><input id="pssid" placeholder="e.g. VenueWiFi" size="17"><span class="mut">on</span><select id="pssidif" title="Wi-Fi uplink to scan"></select>
 <span class="mut">AP on</span><select id="pap" multiple size="2" style="min-width:74px" title="access points to keep up"></select>
 <textarea id="prules" rows="3" cols="26" placeholder="rules, one per line:&#10;api.anthropic.com WiFi0&#10;from:172.18.0.0/16 cable"></textarea>
-<input id="pclaim" placeholder="claim: 192.168.222.153 enp114s0:100 wlo1:50:CNNet" size="46" title="Same-address arbitration for THIS pattern: one address, then one dev:priority[:ssid,ssid] per adapter. Highest-priority ELIGIBLE adapter (carrier + associated to a listed SSID) holds the address; the others hold none. Leave blank for no claim. Inert until the pattern is active AND the claim arbiter is armed.">
+<input id="pclaim" placeholder="claim: 10.0.0.10 enp114s0:100 wlo1:50:HomeAP" size="46" title="Same-address arbitration for THIS pattern: one address, then one dev:priority[:ssid,ssid] per adapter. Highest-priority ELIGIBLE adapter (carrier + associated to a listed SSID) holds the address; the others hold none. Leave blank for no claim. Inert until the pattern is active AND the claim arbiter is armed.">
 <button onclick="patSnapshot()" title="fill v4/v6/rules + active AP from the CURRENT live config">↧ snapshot current</button>
 <button onclick="patSave()">+ save</button></div>
 <small style="display:block;padding:2px 14px 10px">trigger = required uplinks UP <i>and</i> (optional) an SSID in range on the chosen Wi-Fi. Uplink details live in NetworkManager / OS settings; APs in the card above. A “floor” fallback is auto-added. Click <b>edit</b> on a row to load it here.</small></section>

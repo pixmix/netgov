@@ -208,7 +208,7 @@ func uplinkRoutingDesired(st *State) []nmDesired {
 // SECOND (2.33).
 //
 // Priority alone says which leg we would PREFER; it says nothing about which leg currently WORKS.
-// Ranking on preference alone is how ms-rosy came to advertise .186 from a healthy leg while
+// Ranking on preference alone is how host-b came to advertise .186 from a healthy leg while
 // sourcing its traffic through one losing 70-100% of frames: the arbiter had already rejected that
 // leg and the metric never heard about it. A demoted leg keeps its relative order among the other
 // demoted legs, so a box whose legs are all failing does not shuffle for no reason.
@@ -344,7 +344,7 @@ func applyUplinkRouting(st *State) (int, []string) {
 			//
 			// ⚠️ THE HAZARD IS STATE-DEPENDENT, NOT PERMANENT — and that is worse. My first reading
 			// was "a box running identity-MAC failover always carries a cloned MAC, so metrics are
-			// inert there"; c-001 measured ms-rosy and it is false. A leg whose PERMANENT MAC is
+			// inert there"; c-001 measured host-b and it is false. A leg whose PERMANENT MAC is
 			// already the identity MAC needs no clone, so in the steady state the profile carries
 			// none and reapply works. A clone is present only while the design needs one: a leg
 			// PARKED on its locally-administered variant, or a standby WEARING the identity.
@@ -420,7 +420,7 @@ func uplinkRoutingVerify(st *State) []string {
 	return out
 }
 
-// staleEvidenceWarning is the signal whose ABSENCE let ms-rosy black-hole its own LAN for hours
+// staleEvidenceWarning is the signal whose ABSENCE let host-b black-hole its own LAN for hours
 // while every check reported healthy (n-649, 2026-08-30).
 //
 // uplinkRoutingVerify compares the kernel's metric against what netgov WANTS. When the demotion
