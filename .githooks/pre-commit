@@ -63,20 +63,34 @@ ALLOW_V4_NETS = [ipaddress.ip_network(n) for n in (
 )]
 ALLOW_V6_NETS = [ipaddress.ip_network(n) for n in (
     "2001:db8::/32",     # RFC 3849 documentation prefix
-    "fd00:db8::/32",     # our ULA-shaped documentation prefix
+    # `fd00::/16` — the conventional "example ULA" corner. Deliberately wider than a single
+    # documentation prefix, because `fd00::/8` is the ULA RANGE ITSELF (RFC 4193) and a
+    # comment saying so is not a leak; `fd00::1` is as generic as an address gets. Our real
+    # ULA is `fd92:...`, which stays refused. Found by the gate rejecting its own repo.
+    "fd00::/16",
     # Public anycast resolvers the tool PINGS. These are global on purpose and belong in
     # the code: they are a well-known service, not a machine of ours. Caught as a false
     # positive on this gate's own first run, which is the right way to find the line.
     "2606:4700:4700::/48",   # Cloudflare DNS — the v6 reachability probe target
     "2620:fe::/48",          # Quad9, if a probe ever moves there
 )]
+# A designator naming a whole ADDRESS CLASS is not a machine. `fc00::/7` is "the ULA range" and
+# `2000::/3` is "global unicast"; a routing tool cannot discuss its own rules without writing them.
+# Enumerated by listing every parseable v6 token in the tree at once rather than discovering them
+# one failed run at a time — three consecutive false positives is a signal to stop iterating and
+# go and look.
+ALLOW_V6_LITERAL = {"fc00::/7", "2000::/3", "::/0", "::/128"}
+
 ALLOW_MAC = re.compile(
     r"^(?:00|02):00:5e:00:53:[0-9a-f]{2}$"   # RFC 7042 doc range + its LA twin
     r"|^02:11:22:33:44:55$|^11:22:33:44:55:66$|^aa:bb:cc:dd:ee:ff$", re.I)
 
 # ------------------------------------------------------------------- scanners --
 RX_V4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-RX_V6 = re.compile(r"\b(?:[0-9a-f]{1,4}:){2,7}(?::|[0-9a-f]{1,4})(?:::)?[0-9a-f:]*\b", re.I)
+# ⚠️ NO TRAILING \b. A word boundary cannot exist between `:` and `/`, so `\b` forced
+# `2a01:...:2c00::/64` to match as `2a01:...:2c00` — which does not parse, so the prefix
+# form was silently skipped. Optional /len is captured and parsed as a network.
+RX_V6 = re.compile(r"(?<![0-9a-fA-F:])[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?:/\d{1,3})?", re.I)
 # nmcli's terse output escapes the separator (`4A\:21\:0B\:…`), so the backslash is
 # OPTIONAL, not an alternative separator. Written the other way this pattern misses every
 # escaped MAC — which is exactly the form that slipped past a hand-written grep on
@@ -126,14 +140,28 @@ def bad_v4(text):
 
 def bad_v6(text):
     for m in RX_V6.finditer(text):
-        s = m.group(0).rstrip(":")
-        if s.count(":") < 2:
+        raw = m.group(0)
+        if raw.count(":") < 2:
             continue
+        # ⚠️ DO NOT rstrip(":") — that turns the PREFIX form `2a01:...:2c00::` into
+        # `2a01:...:2c00`, which does not parse, so the match is skipped and a prefix written
+        # as `::/64` sails through. That is the exact string this whole cleanup was about, and
+        # the gate could not see it until a test fed it the real value. Try the match as
+        # found, and only then a single trailing colon removed.
+        a = None
         try:
-            a = ipaddress.ip_address(s)
+            a = ipaddress.ip_network(raw, strict=False).network_address if "/" in raw \
+                else ipaddress.ip_address(raw)
         except ValueError:
+            try:
+                a = ipaddress.ip_address(raw.rstrip(":") or raw)
+            except ValueError:
+                continue
+        if a is None or a.version != 6:
             continue
         if a.is_loopback or a.is_link_local or a.is_multicast or a.is_unspecified:
+            continue
+        if raw in ALLOW_V6_LITERAL:
             continue
         if any(a in n for n in ALLOW_V6_NETS):
             continue
@@ -151,6 +179,46 @@ def bad_mac(text):
             return m, ("a MAC outside RFC 7042's documentation range — real hardware, and the "
                        "tell-tale of a pasted `ip`/`nmcli` capture")
     return None, ""
+
+
+# ⚠️ A COMMIT MESSAGE IS PUBLISHED CONTENT AND THIS GATE COULD NOT SEE IT.
+# Found 2026-09-10, before the first push: the message explaining the removal of a real
+# globally-routable /64 QUOTED that /64, and the message adding the box-model axis quoted the
+# box model. Both would have published, permanently, the exact strings their own commits
+# removed — and the standing decision is not to rewrite published history, so a log entry is
+# forever. `pre-commit` inspects staged FILES; the message is a different surface, and needs
+# `commit-msg`. A gate whose scope excludes a published surface reads exactly like a clean one.
+def scan_text(text):
+    for scan in (bad_v4, bad_v6, bad_mac):
+        m, why = scan(text)
+        if m:
+            return m, why
+    for rx, why in RX_NAMES:
+        m = rx.search(text)
+        if m:
+            return m, why
+    return None, ""
+
+
+def check_message(path):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    # Ignore comment lines git strips, and the scissors section.
+    body = "\n".join(l for l in text.split("\n") if not l.startswith("#"))
+    m, why = scan_text(body)
+    if m:
+        print("\n\u2717 COMMIT REFUSED \u2014 the MESSAGE names the network this repo must not "
+              "describe:\n", file=sys.stderr)
+        print(f"      found: {m.group(0)[:40]!r}\n      why:   {why}\n", file=sys.stderr)
+        print("A commit message is published content and cannot be rewritten once pushed.",
+              file=sys.stderr)
+        print("Describe the value instead of quoting it.\n", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+
+if "--message" in sys.argv:
+    check_message(sys.argv[sys.argv.index("--message") + 1])
 
 
 def staged_files():
