@@ -312,7 +312,9 @@ func cmdWeb(st *State, args []string) {
 		addr = v
 	}
 	if !strings.HasPrefix(addr, "127.0.0.1:") && !strings.HasPrefix(addr, "localhost:") {
-		fmt.Fprintln(os.Stderr, "refusing non-localhost bind (host-ports-nuc12wsh-b contract):", addr)
+		// The dashboard has no authentication and can change this host's routing, so a
+		// non-loopback bind hands that to the network. Refuse rather than warn.
+		fmt.Fprintln(os.Stderr, "refusing non-localhost bind (the dashboard has no authentication):", addr)
 		os.Exit(1)
 	}
 

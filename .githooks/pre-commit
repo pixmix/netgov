@@ -84,9 +84,16 @@ RX_V6 = re.compile(r"\b(?:[0-9a-f]{1,4}:){2,7}(?::|[0-9a-f]{1,4})(?:::)?[0-9a-f:
 RX_MAC = re.compile(r"\b(?:[0-9a-f]{2}\\?[:-]){5}[0-9a-f]{2}\b", re.I)
 
 RX_NAMES = [
-    (re.compile(r"\b(ms-rosy|msrosy|nuc-server|pm-NUC\w*|pm-P2-MAX|pear-windows|"
-                r"hky-admin\w*|timeline-replica|proxy-[ab])\b", re.I),
-     "one of our hostnames — a map is what a stranger lacks"),
+    # ⚠️ `pm-NUC\w*` alone is NOT enough, and this is how we learned it: `web.go` shipped
+    # "host-ports-nuc12wsh-b contract" in a user-visible error for months. The box model
+    # appears BARE, with no `pm-` prefix, inside a semaphore name — so match the model
+    # strings themselves, and match our semaphore-name shapes, which name hosts by habit.
+    (re.compile(r"\b(ms-rosy|msrosy|nuc-server|pm-NUC\w*|nuc12wsh\w*|nuc10i[0-9a-z]*|"
+                r"pm-P2-MAX|pear-windows|hky-admin\w*|timeline-replica|proxy-[ab])\b", re.I),
+     "one of our hostnames or box models — a map is what a stranger lacks"),
+    (re.compile(r"\b(host-ports|lan-vpn-egress|lan-router-openwrt|lan-ip-ms-rosy|"
+                r"lan-remote-access|session-whereami|netgov-(ms-rosy|nuc\w+))\b", re.I),
+     "an internal semaphore name — it names a contract, a host, and that a mesh exists"),
     (re.compile(r"\b(CNNet|TowerNet|Motionlab\w*|CIC-2\.4|CIC-Encrypted|Vodafone-\d+)\b", re.I),
      "one of our SSIDs — it names a place as well as a network"),
     (re.compile(r"\b(mgzllc\.com|station188|hmwizard\.com|italian-bakery-gz|"
