@@ -297,7 +297,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.34"
+const artefactVersion = "netgov/2.35"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -1042,8 +1042,25 @@ func planFamily(st *State, fam string) (clean, build [][]string) {
 	}
 	clean = append(clean, ipfam(fam, "route", "flush", "table", itoa(tableBlock)))
 
-	// blackhole table for leak-protect / "block"
-	build = append(build, ipfam(fam, "route", "add", "blackhole", "default", "table", itoa(tableBlock)))
+	// Leak-protect / "block" table. UNREACHABLE, NOT BLACKHOLE, and the difference is the whole
+	// point: the route type chooses the errno every application downstream will print.
+	//
+	//	blackhole    -> EINVAL       22   "Invalid argument"
+	//	unreachable  -> EHOSTUNREACH 113  "No route to host"
+	//	prohibit     -> EACCES       13   "Permission denied"
+	//	(no route)   -> ENETUNREACH  101  "Network is unreachable"
+	//
+	// Measured in a throwaway namespace, not recalled. Until 2.35 this was `blackhole`, so a
+	// blocked connection surfaced as "Invalid argument" — a string that names nothing, and which
+	// ssh then wraps in "Could not read from remote repository. Please make sure you have the
+	// correct access rights", pointing three layers away at authentication. A `git push` was
+	// investigated as a key problem because of it.
+	//
+	// `blackhole` exists to drop traffic SILENTLY. A netgov block is a STATED POLICY and should
+	// say so, so the error names the routing layer, which is the truth. Not `prohibit`: on an
+	// ssh or git operation "Permission denied" reads as a credential failure, which is the exact
+	// misdirection being removed.
+	build = append(build, ipfam(fam, "route", "add", "unreachable", "default", "table", itoa(tableBlock)))
 
 	live := map[string]Uplink{}
 	for _, u := range st.Uplinks {
