@@ -252,6 +252,12 @@ says so.
 replying, with a plausible time, and never synchronise you. This is the button to press before
 believing anything else on the card.
 
+The probe list includes an **htpdate-fallback (HTTPS)** row when that tool is installed here — a
+differently-shaped source (TCP, three hosts, a consensus), which is exactly why it is worth reading
+beside the NTP rows: it is the one that can contradict them. A host carrying an older build of the
+tool reads `unavailable` with the reason, because that build ignores `--report` and can exit 0
+having printed nothing.
+
 ⚠️ If another tool has a drop-in in `/etc/systemd/timesyncd.conf.d/`, the note names it, and says
 that netgov's file outranks a lower-numbered one until you choose **Unmanaged**.
 

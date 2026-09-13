@@ -604,6 +604,29 @@ func cmdWeb(st *State, args []string) {
 				rows = append(rows, row{Addr: t, Stratum: str, Offset: off.Seconds(), OK: true})
 			}
 		}
+		// The HTTPS-Date source sits in the same list on purpose: it is differently shaped (TCP,
+		// three hosts, a consensus), so it is the one row that can contradict the NTP rows.
+		if htpdatePath() != "" {
+			bind := ""
+			if st.Time != nil && st.Time.Mode == "htpdate" && st.Time.Via != "" {
+				if u := upByName(st, st.Time.Via); u != nil {
+					bind = u.Dev
+				}
+			}
+			hr, herr := htpdateRunReport(bind)
+			switch {
+			case hr == nil:
+				rows = append(rows, row{Addr: "htpdate-fallback (HTTPS)", Note: "unavailable: " + herr.Error()})
+			case !hr.HasOff:
+				rows = append(rows, row{Addr: "htpdate-fallback (HTTPS)", Note: hr.Status + " — could not measure"})
+			default:
+				n := hr.Status
+				if herr != nil {
+					n += " ⚠ " + herr.Error()
+				}
+				rows = append(rows, row{Addr: "htpdate-fallback (HTTPS)", Stratum: 0, Offset: hr.Offset, OK: true, Note: n})
+			}
+		}
 		writeJSON(w, map[string]any{"ok": true, "rows": rows})
 	})
 
@@ -1198,7 +1221,8 @@ async function setTimeVia(){if(S.time_mode==='unmanaged')return;
   S=await post('/api/time',{mode:S.time_mode,servers:(S.time_sources||[]).join(','),via:$('#tvia').value||''});render()}
 async function timeApply(){log('applying clock policy…');const r=await post('/api/time-apply',{});log(r.out||(r.ok?'applied':'failed'));load()}
 async function timeProbe(){$('#tprobe').textContent='asking…';const r=await post('/api/time-probe',{});
-  $('#tprobe').innerHTML=(r.rows||[]).map(x=>'<div>'+x.addr+' — '+(x.ok?('stratum '+x.stratum+', our offset '+x.offset.toFixed(3)+' s')
+  $('#tprobe').innerHTML=(r.rows||[]).map(x=>'<div>'+x.addr+' — '+(x.ok
+    ?((x.stratum?('stratum '+x.stratum+', '):'')+'our offset '+x.offset.toFixed(3)+' s'+(x.note?(' · '+x.note):''))
     :('<b>'+(x.stratum?('stratum '+x.stratum+': '):'')+x.note+'</b>'))+'</div>').join('')||'nothing to probe'}
 async function apSave(){if(!$('#apn').value){alert('name required');return}const psk=$('#apsk').value;if(psk&&psk.length<8){alert('passphrase must be ≥8 chars');return}
  S=await post('/api/ap',{action:'save',name:$('#apn').value,dev:$('#aif').value,ssid:$('#assid').value,psk:psk,band:$('#aband').value});render();$('#apn').value='';$('#assid').value='';$('#apsk').value='';log('AP defined — switch it on here, or add it to a pattern')}

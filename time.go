@@ -27,11 +27,16 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
+
+func parseFloat(s string) (float64, error) { return strconv.ParseFloat(s, 64) }
+func atoiSafe(s string) int                { n, _ := strconv.Atoi(s); return n }
 
 // TimeSync is the host's declared clock policy. nil State.Time means UNMANAGED, not "pool":
 // netgov must not adopt a host property nobody asked it to hold — the same rule Uplink.CanDefault
@@ -109,6 +114,100 @@ func foreignTimeDropIns() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ---------- htpdate-fallback, as a measurable source (contract: c-001, n-839) ----------
+//
+// `htpdate-fallback --report` measures without touching the clock, needs no root and takes no
+// lock, so netgov may call it per candidate leg as its own user. Two parts of its contract are
+// load-bearing here and neither is obvious:
+//
+//	· IT MEASURES EVEN WHEN NTPSynchronized=yes (status=ok-ntp-synced). Standing down governs
+//	  SETTING the clock, never measuring it — otherwise the stratum-16 case, a source that
+//	  answers and is not a clock, cannot be displayed at all.
+//	· EXIT 10 (stood down) AND 11 (within threshold) ARE HEALTHY. A caller that reads non-zero
+//	  as failure reports a working tool as broken — the defect c-001 found in their own unit,
+//	  and the reason this code lists the healthy codes explicitly instead of testing != 0.
+//
+// ⚠️ AND THE CASE THAT IS NOT IN THE CONTRACT: an OLDER build (1.1) does not know `--report`,
+// ignores it, and as a non-root user exits **0 having printed nothing at all**. Measured on the
+// dev host 2026-09-13. So the check is THE PRESENCE OF A PARSEABLE LINE, never the exit status:
+// `rc=0` with no output is the most convincing way for a tool to tell you nothing.
+type htpdateReport struct {
+	Status  string  // ok-ntp-synced | ok-ntp-unsynced | too-few-sources | …
+	Offset  float64 // seconds; our clock against the HTTPS Date consensus
+	HasOff  bool    // false when the tool reported "-" (it could not measure)
+	Sources int
+	Spread  string
+	Bind    string
+	Raw     string
+}
+
+// htpdateRunReport measures via the HTTPS-Date tool, optionally bound to one leg. For this source
+// "over a leg" is the tool's own BIND (curl --interface), NOT a netgov route rule: three HTTPS
+// hosts pinned by destination would be the wrong mechanism for the same intent, and a bound leg
+// with no route refuses outright rather than returning a plausible number.
+func htpdateRunReport(bind string) (*htpdateReport, error) {
+	p := htpdatePath()
+	if p == "" {
+		return nil, fmt.Errorf("htpdate-fallback is not installed")
+	}
+	cmd := exec.Command(p, "--report")
+	cmd.Env = append(os.Environ(), "BIND="+bind)
+	out, err := cmd.CombinedOutput()
+	var rc int
+	if ee, ok := err.(*exec.ExitError); ok {
+		rc = ee.ExitCode()
+	}
+	r := parseHtpdateLine(string(out))
+	if r == nil {
+		return nil, fmt.Errorf("no report line (needs htpdate-fallback/1.3+; an older build ignores --report and can exit 0 silently) rc=%d", rc)
+	}
+	switch rc {
+	case 0, 10, 11: // acted/reported · stood down · within threshold — all healthy
+		return r, nil
+	case 2:
+		return r, fmt.Errorf("too few sources (a bound leg with no route refuses rather than guessing)")
+	case 3:
+		return r, fmt.Errorf("sources disagreed beyond the spread")
+	default:
+		return r, fmt.Errorf("htpdate-fallback exit %d", rc)
+	}
+}
+
+// parseHtpdateLine pulls the report out of whatever the tool printed, or nil if there is no report
+// in it. Separated from the exec so the contract can be tested without a binary present.
+func parseHtpdateLine(out string) *htpdateReport {
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.Contains(l, "mode=report") {
+			continue
+		}
+		r := &htpdateReport{Raw: strings.TrimSpace(l)}
+		for _, tok := range strings.Fields(l) {
+			k, v, ok := strings.Cut(tok, "=")
+			if !ok {
+				continue
+			}
+			switch k {
+			case "status":
+				r.Status = v
+			case "offset":
+				if v != "-" {
+					if f, e := parseFloat(v); e == nil {
+						r.Offset, r.HasOff = f, true
+					}
+				}
+			case "sources":
+				r.Sources = atoiSafe(v)
+			case "spread":
+				r.Spread = v
+			case "bind":
+				r.Bind = v
+			}
+		}
+		return r
+	}
+	return nil
 }
 
 // ---------- SNTP: ask for the time, which is the only honest check ----------
@@ -370,13 +469,37 @@ func timeApplyRoot(st *State) {
 		}
 		// Its own timer keeps the schedule; netgov selects it and asks for one run now, so the
 		// operator sees the effect of the choice immediately rather than at the next hour.
-		if out, err := run(p); err != nil {
-			fmt.Fprintln(os.Stderr, "netgov: htpdate-fallback run failed:", err)
-			if out != "" {
-				fmt.Fprintln(os.Stderr, "  "+strings.ReplaceAll(out, "\n", "\n  "))
+		// EXIT 10 AND 11 ARE HEALTHY (stood down / within threshold) — testing `err != nil` here
+		// would report a working tool as broken, which is the exact defect c-001 fixed in their
+		// own unit with SuccessExitStatus=10 11.
+		bind := ""
+		if st.Time.Via != "" {
+			if u := upByName(st, st.Time.Via); u != nil {
+				bind = u.Dev
 			}
-		} else if out != "" {
-			fmt.Println("  " + strings.ReplaceAll(out, "\n", "\n  "))
+		}
+		cmd := exec.Command(p)
+		cmd.Env = append(os.Environ(), "BIND="+bind)
+		out, err := cmd.CombinedOutput()
+		rc := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			rc = ee.ExitCode()
+		}
+		if s := strings.TrimSpace(string(out)); s != "" {
+			fmt.Println("  " + strings.ReplaceAll(s, "\n", "\n  "))
+		}
+		switch rc {
+		case 0:
+			fmt.Println("  ✓ ran")
+		case 10:
+			fmt.Println("  ✓ stood down — NTP is synchronised, which is the tool deferring correctly, not a failure")
+		case 11:
+			fmt.Println("  ✓ within threshold — nothing to correct")
+		default:
+			fmt.Fprintf(os.Stderr, "netgov: htpdate-fallback exit %d\n", rc)
+		}
+		if bind != "" {
+			fmt.Println("  bound to", bind, "— for this source a leg pin is the tool's own BIND (curl --interface), not a route rule")
 		}
 		fmt.Println("netgov: time source = htpdate-fallback (HTTPS Date; TCP, so a path that eats UDP 123 does not matter)")
 		fmt.Println("  ⚠️ it stands down by itself when NTPSynchronized=yes — that is its rule, not netgov's, and netgov does not override it")
@@ -449,7 +572,7 @@ func timeProbeTargets(st *State) []string {
 }
 
 func timeProbe(targets []string) {
-	if len(targets) == 0 {
+	if len(targets) == 0 && htpdatePath() == "" {
 		fmt.Println("nothing to probe")
 		return
 	}
@@ -464,6 +587,31 @@ func timeProbe(targets []string) {
 			fmt.Printf("  %-28s stratum %-2d     ⚠ UNSYNCHRONISED source — answers, but is not a clock\n", t, str)
 		default:
 			fmt.Printf("  %-28s stratum %-2d     our offset %+.3f s\n", t, str, off.Seconds())
+		}
+	}
+	// The HTTPS-Date source is differently shaped — TCP, three hosts, a consensus — which is
+	// exactly why it belongs beside the NTP rows: it is the instrument that can contradict them.
+	if htpdatePath() != "" {
+		bind := ""
+		if st := loadState(statePath()); st.Time != nil && st.Time.Mode == "htpdate" && st.Time.Via != "" {
+			if u := upByName(st, st.Time.Via); u != nil {
+				bind = u.Dev
+			}
+		}
+		r, err := htpdateRunReport(bind)
+		label := "htpdate-fallback (HTTPS)"
+		switch {
+		case r == nil:
+			fmt.Printf("  %-28s unavailable    (%v)\n", label, err)
+		case !r.HasOff:
+			fmt.Printf("  %-28s %-14s could not measure (sources=%d)\n", label, r.Status, r.Sources)
+		default:
+			note := ""
+			if err != nil {
+				note = "  ⚠ " + err.Error()
+			}
+			fmt.Printf("  %-28s %-14s our offset %+.3f s (sources=%d spread=%s)%s\n",
+				label, r.Status, r.Offset, r.Sources, dash(r.Spread), note)
 		}
 	}
 }

@@ -367,6 +367,29 @@ order: netgov's `50-` outranks a peer's `10-`. `status` and the dashboard name a
 `apply` says out loud that it is overriding one. netgov wins because you chose netgov — it does not
 get to win quietly.
 
+### The `htpdate` source (2.37)
+
+`htpdate-fallback --report` measures the offset against three HTTPS `Date` headers **without
+touching the clock**, needs no root and takes no lock, so netgov calls it per candidate leg as your
+own user. Two halves of that contract are load-bearing:
+
+- **It measures even when the host is already synchronised** (`status=ok-ntp-synced`). Standing
+  down governs *setting* the clock, never *measuring* it — otherwise the case this card exists for,
+  a source that answers and is not a clock, cannot be displayed at all.
+- **Exit 10 (stood down) and 11 (within threshold) are HEALTHY.** netgov lists the healthy codes
+  explicitly rather than testing `!= 0`, because a caller that reads non-zero as failure reports a
+  working tool as broken.
+
+⚠️ **`--via` means something different for this source, and that is deliberate.** For the NTP modes
+a leg pin is a destination route rule; for `htpdate` it is the tool's own `BIND` (`curl
+--interface`), because three HTTPS hosts pinned by destination would be the wrong mechanism for the
+same intent. A bound leg with no route **refuses** rather than reporting a plausible number.
+
+⚠️ **An older build (1.1) ignores `--report`, and as a non-root user exits 0 having printed
+nothing.** netgov therefore keys on **the presence of a parseable line, never the exit status** —
+`rc=0` with no output is the most convincing way for a tool to tell you nothing. A host in that
+state reads `unavailable`, with the reason.
+
 ### `probe` is the check, and stratum is why
 
 ```

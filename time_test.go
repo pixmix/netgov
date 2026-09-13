@@ -146,3 +146,36 @@ func TestSyncTimeRulesOwnsOnlyItsOwn(t *testing.T) {
 		t.Fatalf("unmanaged must clear only netgov's pins, got %+v", st.Rules)
 	}
 }
+
+// The report parser must read c-001's contract line (n-839) — and, more importantly, must treat a
+// MISSING line as unusable whatever the exit status: htpdate-fallback/1.1 ignores --report and, as
+// a non-root user, exits 0 having printed nothing. rc=0 with no output is a tool telling you
+// nothing in the most convincing way available.
+func TestHtpdateReportParse(t *testing.T) {
+	cases := []struct {
+		line    string
+		wantOff float64
+		hasOff  bool
+		status  string
+		sources int
+	}{
+		{"htpdate-fallback status=ok-ntp-synced offset=0 sources=3 spread=0 bind=- mode=report", 0, true, "ok-ntp-synced", 3},
+		{"htpdate-fallback status=ok-ntp-unsynced offset=-1 sources=3 spread=1 bind=eth-doc mode=report", -1, true, "ok-ntp-unsynced", 3},
+		{"htpdate-fallback status=too-few-sources offset=- sources=0 spread=- bind=lo mode=report", 0, false, "too-few-sources", 0},
+	}
+	for _, c := range cases {
+		r := parseHtpdateLine(c.line)
+		if r == nil {
+			t.Fatalf("no parse: %q", c.line)
+		}
+		if r.Status != c.status || r.Sources != c.sources || r.HasOff != c.hasOff || (c.hasOff && r.Offset != c.wantOff) {
+			t.Fatalf("parsed %+v from %q", r, c.line)
+		}
+	}
+	if parseHtpdateLine("htpdate-fallback: line 22: /run/lock/...: Permission denied") != nil {
+		t.Fatal("a build with no --report support must NOT parse as a report — its silence is the finding")
+	}
+	if parseHtpdateLine("") != nil {
+		t.Fatal("empty output must never parse as a measurement")
+	}
+}
