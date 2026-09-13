@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // In-app help: the repo docs are embedded so /help is self-contained in the binary.
@@ -107,6 +108,22 @@ type stateView struct {
 	Version string `json:"version"`
 	Source  string `json:"source"`
 
+	// Time is the host's clock policy, shown here because a clock that is wrong is invisible
+	// until something else breaks — and the two booleans below are the pair a whole LAN's wrong
+	// clocks hid behind: NTPEnabled says the client is running, NTPSynced says something answered
+	// it. They are never merged into one badge for that reason.
+	TimeMode    string   `json:"time_mode"`
+	TimeSources []string `json:"time_sources"`
+	TimeVia     string   `json:"time_via"`
+	NTPEnabled  bool     `json:"ntp_enabled"`
+	NTPSynced   bool     `json:"ntp_synced"`
+	NTPFrom     string   `json:"ntp_from"`
+	TimeDropIn  bool     `json:"time_dropin"`
+	// TimeForeign: another tool's timesyncd drop-in. Shown because netgov's file outranks a
+	// lower-numbered one silently — see foreignTimeDropIns.
+	TimeForeign []string `json:"time_foreign"`
+	TimeGateway string   `json:"time_gateway"`
+
 	// ClaimArmed is the ADDRESS ARBITER's arm flag — deliberately separate from Armed above,
 	// which is the pattern failover loop. Two switches, one word "arm": the operator armed the
 	// loop on 2026-08-13 and reasonably believed arbitration was live. The UI must show them
@@ -188,6 +205,20 @@ func buildView() stateView {
 		Armed: st.Armed, Active: st.ActivePattern,
 		Version: artefactVersion, Source: artefactSource(), ClaimArmed: claimArmed()}
 	v.ClaimEnforcing, v.ClaimChecks = claimEnforcement()
+	v.TimeMode = "unmanaged"
+	if st.Time != nil {
+		v.TimeMode, v.TimeVia = st.Time.Mode, st.Time.Via
+	}
+	v.TimeSources = timeSources(st.Time)
+	if v.TimeMode == "htpdate" {
+		v.TimeSources = []string{"htpdate-fallback (HTTPS Date, TCP)"}
+	}
+	v.NTPEnabled, v.NTPSynced, v.NTPFrom = timesyncdState()
+	if _, err := os.Stat(timeDropIn); err == nil {
+		v.TimeDropIn = true
+	}
+	v.TimeGateway = defaultGateway4()
+	v.TimeForeign = foreignTimeDropIns()
 	v.MetricGovernance = governanceLines(st)
 	v.BinaryReplaced, _ = runningBinaryReplaced()
 	if cl := claimForActive(st); cl != nil {
@@ -504,6 +535,78 @@ func cmdWeb(st *State, args []string) {
 		writeJSON(w, buildView())
 	})
 
+	// Time: declaring the policy is unprivileged (it is a line in netgov's own state); writing
+	// the drop-in and restarting the client is not, and goes through priv() like apply/reset.
+	mux.HandleFunc("/api/time", func(w http.ResponseWriter, r *http.Request) {
+		s := loadState(statePath())
+		_ = r.ParseForm()
+		mode, via := r.FormValue("mode"), r.FormValue("via")
+		srv := splitCSV(r.FormValue("servers"))
+		switch mode {
+		case "unmanaged", "":
+			s.Time = nil
+		case "pool":
+			s.Time = &TimeSync{Mode: "pool", Servers: srv, Via: via}
+		case "server":
+			if r.FormValue("gateway") == "1" {
+				if gw := defaultGateway4(); gw != "" {
+					srv = append(srv, gw)
+				}
+			}
+			if len(srv) == 0 {
+				writeJSON(w, map[string]any{"ok": false, "out": "mode=server needs a server address (or use the gateway button)"})
+				return
+			}
+			s.Time = &TimeSync{Mode: "server", Servers: srv, Via: via}
+		case "htpdate":
+			if htpdatePath() == "" {
+				writeJSON(w, map[string]any{"ok": false,
+					"out": "htpdate-fallback is not installed on this host — it is another project's artefact; netgov calls it, never ships it"})
+				return
+			}
+			s.Time = &TimeSync{Mode: "htpdate", Via: via}
+		default:
+			writeJSON(w, map[string]any{"ok": false, "out": "unknown mode " + mode})
+			return
+		}
+		syncTimeRules(s)
+		_ = saveState(s, statePath())
+		writeJSON(w, buildView())
+	})
+
+	// Probe is the verification instrument, kept separate from /api/state because it costs real
+	// time on the wire: a source that does not answer takes the full timeout to say so, and the
+	// page must not stall behind it on every refresh.
+	mux.HandleFunc("/api/time-probe", func(w http.ResponseWriter, r *http.Request) {
+		st := loadState(statePath())
+		_ = r.ParseForm()
+		targets := splitCSV(r.FormValue("targets"))
+		if len(targets) == 0 {
+			targets = timeProbeTargets(st)
+		}
+		type row struct {
+			Addr    string  `json:"addr"`
+			Stratum int     `json:"stratum"`
+			Offset  float64 `json:"offset"`
+			OK      bool    `json:"ok"`
+			Note    string  `json:"note"`
+		}
+		var rows []row
+		for _, t := range targets {
+			str, off, err := sntpQuery(t, 3*time.Second)
+			switch {
+			case err != nil:
+				rows = append(rows, row{Addr: t, Note: "no answer"})
+			case str == 0 || str >= 16:
+				rows = append(rows, row{Addr: t, Stratum: str,
+					Note: "answers, but is NOT a clock — it cannot reach its own upstream"})
+			default:
+				rows = append(rows, row{Addr: t, Stratum: str, Offset: off.Seconds(), OK: true})
+			}
+		}
+		writeJSON(w, map[string]any{"ok": true, "rows": rows})
+	})
+
 	mux.HandleFunc("/api/link", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		var out string
@@ -640,6 +743,7 @@ func cmdWeb(st *State, args []string) {
 	}
 	mux.HandleFunc("/api/apply", priv("__apply"))
 	mux.HandleFunc("/api/reset", priv("__reset"))
+	mux.HandleFunc("/api/time-apply", priv("__time-apply"))
 
 	fmt.Printf("netgov dashboard on http://%s\n", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
@@ -925,6 +1029,24 @@ small{color:var(--mut)}
 <button onclick="patSave()">+ save</button></div>
 <small style="display:block;padding:2px 14px 10px">trigger = required uplinks UP <i>and</i> (optional) an SSID in range on the chosen Wi-Fi. Uplink details live in NetworkManager / OS settings; APs in the card above. A “floor” fallback is auto-added. Click <b>edit</b> on a row to load it here.</small></section>
 
+<section><h2>Clock — this host's time source <span id="tbadge"></span></h2>
+<div class="row"><span class="mut">source:</span>
+<button onclick="setTime('server',1)" title="ask whatever gateway this host is behind RIGHT NOW — read at the moment you click, never stored">Gateway</button>
+<button onclick="setTime('pool')" title="public NTP servers, asked directly — the no-router case">Public pool</button>
+<button onclick="setTime('htpdate')" title="HTTPS Date fallback (TCP): works where UDP 123 does not">htpdate</button>
+<button onclick="setTime('unmanaged')" title="netgov holds nothing; the host's own timesyncd config applies">Unmanaged</button>
+<input id="tsrv" placeholder="or a specific server" size="20"><button onclick="setTimeSrv()">Set</button>
+</div>
+<div class="row"><span class="mut">over leg:</span><select id="tvia" onchange="setTimeVia()"></select>
+<small>pin the time source to one uplink — the point of doing this in netgov rather than in systemd</small></div>
+<div class="row"><button class="go" onclick="timeApply()">Apply clock policy</button>
+<button onclick="timeProbe()" title="ask each source for the time; stratum 16 = it cannot reach its own upstream">⟲ probe sources</button>
+<small id="tnote"></small></div>
+<div id="tprobe" class="mut" style="padding:2px 14px 8px"></div>
+<small style="display:block;padding:2px 14px 10px">A host's clock is its own business: this card never reads or writes a router's
+configuration. <b>NTP=yes with synchronised=no means the client is running and nothing has answered it</b> — the state a
+machine sits in indefinitely while its clock drifts on the RTC alone.</small></section>
+
 <section class="danger"><h2>Restore</h2><div class="row">
 <button class="bad" onclick="reset()">⟲ Restore to NetworkManager</button>
 <small>removes ALL netgov rules &amp; tables → the OS/NM baseline reappears (netgov never edits NM itself)</small></div></section>
@@ -978,6 +1100,7 @@ function staleBar(html){
 }
 function renderBody(){
  checkStale();
+ renderTime();
  // "default route" is a SELECT, not a checkbox: the property is tri-state and "auto" (hand it
  // back to NetworkManager) is a real, reachable choice, not the absence of one. A checkbox would
  // collapse unmanaged and no into the same unticked box. (2.21)
@@ -1037,6 +1160,22 @@ function renderBody(){
  $('#sub').textContent='default v4='+(S.default_v4||'none')+'  v6='+(S.default_v6||'none')+(S.armed?'  · ARMED('+S.armed+')':'');
 }
 async function load(){S=await (await fetch('/api/state')).json();render()}
+function renderTime(){const b=$('#tbadge');if(!b)return;
+  const mode=S.time_mode||'unmanaged';
+  b.textContent=mode+(S.time_via?(' via '+S.time_via):'');
+  b.className='badge '+(S.ntp_synced?'ok':(S.ntp_enabled?'warn':''));
+  const sel=$('#tvia');if(sel){const cur=sel.value||S.time_via||'';
+    sel.innerHTML='<option value="">(no pin — default route)</option>'+
+      (S.uplinks||[]).map(u=>'<option value="'+u.name+'">'+u.name+'</option>').join('');
+    sel.value=cur}
+  let n='client: NTP='+(S.ntp_enabled?'yes':'no')+' · synchronised='+(S.ntp_synced?'yes':'NO');
+  if(S.ntp_from)n+=' · from '+S.ntp_from;
+  if((S.time_sources||[]).length)n+=' · declared: '+S.time_sources.join(' ');
+  if(S.time_dropin)n+=' · netgov drop-in installed';
+  if(S.ntp_enabled&&!S.ntp_synced)n+='  ⚠ running, and nothing has answered it';
+  if((S.time_foreign||[]).length)n+='  ⚠ another tool also sets a source here: '+S.time_foreign.join(', ')+
+    (S.time_mode!=='unmanaged'?" — netgov's drop-in outranks it (Unmanaged gives it back)":'');
+  $('#tnote').textContent=n}
 function log(m){$('#log').textContent=m}
 async function post(u,d){return (await fetch(u,{method:'POST',body:new URLSearchParams(d)})).json()}
 async function defUp(){S=await post('/api/uplink',{action:'define',name:$('#un').value,dev:$('#ud').value,gw:$('#ug').value});render();$('#un').value='';$('#ud').value='';$('#ug').value=''}
@@ -1050,6 +1189,17 @@ async function addSrc(){let f=$('#sfrom').value;if(f===''){f=prompt('source CIDR
  S=await post('/api/rule',{action:'add',from:f,via:$('#sv').value,fam:$('#sf').value});render()}
 async function delRule(d){S=await post('/api/rule',Object.assign({action:'del'},d));render()}
 async function setDef(){S=await post('/api/default',{v4:$('#d4').value,v6:$('#d6').value});render()}
+async function setTime(mode,gw){S=await post('/api/time',{mode:mode,gateway:gw?'1':'',via:$('#tvia').value||''});render();
+  log('clock policy declared — press Apply to realise it')}
+async function setTimeSrv(){const v=$('#tsrv').value.trim();if(!v){alert('server address or name');return}
+  S=await post('/api/time',{mode:'server',servers:v,via:$('#tvia').value||''});render();$('#tsrv').value='';
+  log('clock policy declared — press Apply to realise it')}
+async function setTimeVia(){if(S.time_mode==='unmanaged')return;
+  S=await post('/api/time',{mode:S.time_mode,servers:(S.time_sources||[]).join(','),via:$('#tvia').value||''});render()}
+async function timeApply(){log('applying clock policy…');const r=await post('/api/time-apply',{});log(r.out||(r.ok?'applied':'failed'));load()}
+async function timeProbe(){$('#tprobe').textContent='asking…';const r=await post('/api/time-probe',{});
+  $('#tprobe').innerHTML=(r.rows||[]).map(x=>'<div>'+x.addr+' — '+(x.ok?('stratum '+x.stratum+', our offset '+x.offset.toFixed(3)+' s')
+    :('<b>'+(x.stratum?('stratum '+x.stratum+': '):'')+x.note+'</b>'))+'</div>').join('')||'nothing to probe'}
 async function apSave(){if(!$('#apn').value){alert('name required');return}const psk=$('#apsk').value;if(psk&&psk.length<8){alert('passphrase must be ≥8 chars');return}
  S=await post('/api/ap',{action:'save',name:$('#apn').value,dev:$('#aif').value,ssid:$('#assid').value,psk:psk,band:$('#aband').value});render();$('#apn').value='';$('#assid').value='';$('#apsk').value='';log('AP defined — switch it on here, or add it to a pattern')}
 async function apOn(n){log('enabling AP '+n+'…');const r=await post('/api/ap',{action:'on',name:n});log(r.out||(r.ok?'AP up':'failed'));if(r.state){S=r.state;render()}else load()}

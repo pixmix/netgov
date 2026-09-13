@@ -297,7 +297,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.35"
+const artefactVersion = "netgov/2.36"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -369,6 +369,12 @@ type Rule struct {
 	From   string `json:"from,omitempty"`
 	Via    string `json:"via"`
 	Fam    string `json:"fam,omitempty"` // "4" | "6" | "both"/""
+
+	// Note marks a rule netgov MANAGES ON A FEATURE'S BEHALF rather than one the operator typed
+	// (currently only "netgov-time"). It exists so a feature can re-derive its own pins without
+	// touching a hand-made rule that happens to name the same destination: `rule del` is the
+	// operator's verb, and a feature must not silently inherit it.
+	Note string `json:"note,omitempty"`
 }
 
 // AP is a NAMED access-point definition (NM `ipv4.method shared`: DHCP+NAT, clients egress
@@ -429,6 +435,10 @@ type State struct {
 	// so `reset` is still a complete restore now that netgov writes NM profiles (2.21). Written
 	// exactly once per property — see nmprops.go for why that is the load-bearing part.
 	NMSaved []NMSaved `json:"nm_saved,omitempty"`
+
+	// Time is the host's clock policy (2.36). nil = UNMANAGED, not "pool" — see time.go for why
+	// that distinction is load-bearing, and for why a clock lives in a routing tool at all.
+	Time *TimeSync `json:"time,omitempty"`
 
 	LegacyDefault string `json:"default,omitempty"` // migrated from v1
 }
@@ -1883,6 +1893,10 @@ func main() {
 	case "__eval-apply":
 		fmt.Println("eval ->", evalPattern(st, true))
 		saveStateKeepOwner(st, sp)
+	case "time":
+		cmdTime(st, rest)
+	case "__time-apply":
+		cmdTime(st, []string{"__apply"})
 	case "claim":
 		cmdClaim(st, rest)
 	case "arm":
@@ -2544,5 +2558,9 @@ func usage() {
                                                claim group (one address, N adapters, priority);
                                                separate arm flag, boots disarmed
   arm [--dry] | disarm                         root failover loop (auto pattern selection); boots disarmed
+  time [status]                                clock policy: source, client state, offsets
+  time set unmanaged|pool|server|htpdate       pick the source (host-local; no router involved)
+           [--servers a,b] [--gateway] [--via <uplink>]
+  time apply | probe [addr…]                   realise it (sudo -A) / ask each source for the time
   web [--addr 127.0.0.1:8474] | install`)
 }

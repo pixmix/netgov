@@ -325,6 +325,61 @@ leg gets no address, reads `UNCONFIGURED, not lossy`, and cannot win the claim b
 before arming identity-MAC on a box you cannot reach — but note it is a *precondition*, not a
 common failure: on a `/24` with a 150-address pool it will not be your problem.
 
+## Clock — `netgov time` (2.36)
+
+```
+netgov time [status]                     source, client state, and who else is setting one
+netgov time set unmanaged|pool|server|htpdate [--servers a,b] [--gateway] [--via <uplink>]
+netgov time apply                        realise it (sudo -A)
+netgov time probe [addr…]                ask each source for the time
+```
+
+**Why a clock is in a routing tool.** Because the interesting cases are routing cases. NTP is
+UDP 123, and a gateway can perfectly well proxy that port into a tunnel that does not carry it —
+the clients then sit at `NTP: yes` / `NTPSynchronized: no` for months, which is a client that is
+running and *nothing answering it*. A host has to be able to settle this alone, over the leg it
+chooses, with no cooperative router in the picture at all.
+
+⚠️ **netgov holds no opinion about any router's configuration and keeps no copy of it.** The only
+question it ever asks a gateway is *what time do you think it is* — a measurement, never a config
+read. Whatever is in front of the host today is read at the moment you click **Gateway**, and not
+stored.
+
+| mode | what it does |
+|---|---|
+| `unmanaged` | **the default, and nil-means-unmanaged**: netgov holds nothing, the host's own config applies |
+| `pool` | public NTP servers, asked directly — the no-router case |
+| `server` | a named source: `--servers 10.0.0.1`, or `--gateway` to read whatever gateway this host is behind now |
+| `htpdate` | the HTTPS-`Date` fallback tool (TCP, so a path that eats UDP 123 is irrelevant) |
+
+`--via <uplink>` pins the source to one leg, as an ordinary destination rule per resolved
+address — so `status`, `plan` and `reset` already understand it. *That* is the part that belongs
+to netgov rather than to systemd: "take time over the tether, not over the cable".
+
+### What it writes, and why restore needs no bookkeeping
+
+One file: `/etc/systemd/timesyncd.conf.d/50-netgov.conf`. netgov never edits a file it did not
+create, so `time set unmanaged` + `apply` deletes that one file and the host is back to whatever
+it had — no saved-baseline dance (contrast the NM properties, which needed one).
+
+⚠️ **Another tool may be setting a source in the same directory**, and drop-ins apply in lexical
+order: netgov's `50-` outranks a peer's `10-`. `status` and the dashboard name any such file, and
+`apply` says out loud that it is overriding one. netgov wins because you chose netgov — it does not
+get to win quietly.
+
+### `probe` is the check, and stratum is why
+
+```
+netgov time probe
+# asking each source for the time (stratum 16 = it cannot reach its own upstream)
+  10.0.0.1                     stratum 3      our offset +0.008 s
+  0.pool.ntp.org               stratum 2      our offset +0.001 s
+```
+
+**A source that answers is not necessarily a clock.** An ntpd that cannot reach its own upstream
+keeps replying — at stratum 16, with a plausible-looking time. So "something replied" is not the
+check, and `apply` waits for `NTPSynchronized=yes` rather than trusting the restart it just did.
+
 ## Links
 
 ```

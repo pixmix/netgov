@@ -129,6 +129,13 @@ netgov ap list
 netgov link up|down|reapply <iface>
 netgov web                         # serve the dashboard (localhost)
 
+# clock: which time source this host uses, and over which leg (host-local; no router involved)
+netgov time                        # source, client state, offsets
+netgov time set server --gateway   # ask whatever gateway this host is behind right now
+netgov time set pool | htpdate | unmanaged  [--servers a,b] [--via <uplink>]
+netgov time apply                  # realise it (root)
+netgov time probe [addr...]        # ask each source for the time; stratum 16 = not a clock
+
 # patterns / automatic failover
 netgov pat-list
 netgov pat-set <name> <prio> [--require a,b] [--v4 <uplink|block|direct>] [--v6 ...] [--snapshot] [--floor]

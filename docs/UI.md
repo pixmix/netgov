@@ -225,6 +225,38 @@ identity-MAC host shows **no ⚠ at all**.
 
 ---
 
+## Clock — this host's time source
+
+The badge reads the mode and, when one is set, the leg it is pinned to; it goes green only on
+`NTPSynchronized=yes`. Underneath, the two booleans are printed **side by side and never merged**:
+
+    client: NTP=yes · synchronised=NO   ⚠ running, and nothing has answered it
+
+That pair is the whole point of the card. A whole LAN once sat in exactly that state with every
+clock quietly drifting on its RTC, because `NTP=yes` reads like good news.
+
+| button | what it declares |
+|---|---|
+| **Gateway** | ask whatever gateway this host is behind **right now** — read on the click, never stored |
+| **Public pool** | public NTP servers, directly (the no-router case) |
+| **htpdate** | the HTTPS-`Date` fallback, if that tool is installed here (it is another project's artefact; netgov calls it and never ships it) |
+| **Unmanaged** | netgov holds nothing; the host's own config applies again |
+| *server box* | any specific source, by name or address |
+
+**over leg** pins the source to one uplink. **Apply clock policy** is the privileged step
+(`sudo -A`, like Apply and Restore); declaring a policy changes nothing until then, and the card
+says so.
+
+**⟲ probe sources** asks each candidate for the time and prints the stratum. A row that reads
+*answers, but is NOT a clock* is a server that cannot reach its own upstream — it will keep
+replying, with a plausible time, and never synchronise you. This is the button to press before
+believing anything else on the card.
+
+⚠️ If another tool has a drop-in in `/etc/systemd/timesyncd.conf.d/`, the note names it, and says
+that netgov's file outranks a lower-numbered one until you choose **Unmanaged**.
+
+---
+
 ## Restore
 
 **⟲ Restore to NetworkManager** (`netgov reset`) flushes **all** netgov rules and
