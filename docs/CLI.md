@@ -362,12 +362,28 @@ One file: `/etc/systemd/timesyncd.conf.d/50-netgov.conf`. netgov never edits a f
 create, so `time set unmanaged` + `apply` deletes that one file and the host is back to whatever
 it had — no saved-baseline dance (contrast the NM properties, which needed one).
 
-⚠️ **Another tool may be setting a source in the same directory**, and drop-ins apply in lexical
-order: netgov's `50-` outranks a peer's `10-`. `status` and the dashboard name any such file, and
-`apply` says out loud that it is overriding one. netgov wins because you chose netgov — it does not
-get to win quietly.
+⚠️ **Another tool may be setting a source in the same directory, and the mechanism is NOT
+last-file-wins.** systemd **concatenates** `NTP=` across drop-ins and tries the **earliest file's
+servers first**, so a `50-netgov.conf` that merely sets `NTP=<ours>` is *appended behind* a peer's
+`10-something.conf` — netgov's selection becomes a fallback while the panel says it took effect.
+Measured, and it is exactly what 2.37 did.
 
-### The `htpdate` source (2.37)
+⇒ **netgov's drop-in emits a bare `NTP=` first, which resets the accumulated list**, and then its own
+servers. `FallbackNTP=` is untouched, so a peer's fallbacks still apply behind netgov's choice.
+`status` and the dashboard name any foreign drop-in, and `apply` **compares what netgov asked for
+against `SystemNTPServers`, the list the client is really using**, and warns if they differ.
+
+📌 *The file netgov wrote is not evidence about which server the client uses.* Synchronisation is not
+the check either — a host already synchronised from somebody else's server stays synchronised and
+reports success while netgov's selection sits inert. `timedatectl show-timesync` is the instrument.
+
+### The `htpdate` source — a SEPARATE INSTALL (2.37, stated in the panel since 2.38)
+
+⚠️ **netgov detects this tool; it does not ship or install it.** `netgov time status` and the
+dashboard therefore state the dependency wherever the choice is offered — what it is, where it comes
+from (`~/dev/debug/tools/htpdate-fallback`, owner c-001), the minimum version, and what the installed
+build here actually does. The panel reports **usability by measurement, not by version string**: a
+build that claims 1.3 and cannot answer `--report` reads as unusable, and says why.
 
 `htpdate-fallback --report` measures the offset against three HTTPS `Date` headers **without
 touching the clock**, needs no root and takes no lock, so netgov calls it per candidate leg as your

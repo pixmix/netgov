@@ -258,8 +258,16 @@ beside the NTP rows: it is the one that can contradict them. A host carrying an 
 tool reads `unavailable` with the reason, because that build ignores `--report` and can exit 0
 having printed nothing.
 
-⚠️ If another tool has a drop-in in `/etc/systemd/timesyncd.conf.d/`, the note names it, and says
-that netgov's file outranks a lower-numbered one until you choose **Unmanaged**.
+⚠️ If another tool has a drop-in in `/etc/systemd/timesyncd.conf.d/`, the note names it. **The
+precedence is not what file order suggests:** systemd concatenates `NTP=` across drop-ins and prefers
+the earliest file's servers, so netgov emits a bare `NTP=` to reset the list before setting its own.
+The card prints **what the client is actually using** (`SystemNTPServers`) and flags it in bold when
+that differs from what netgov asked for — the file netgov wrote is not evidence about the live list.
+
+**htpdate is a separate install and the card says so**, in a fold under the buttons: what it is, where
+to get it (`~/dev/debug/tools/htpdate-fallback`, owner c-001), the minimum version, and whether the
+build on this host actually answers `--report` — measured, not read off a version string. The fold's
+summary line says *present and working* or *NOT AVAILABLE HERE* without being opened.
 
 ---
 

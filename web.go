@@ -122,6 +122,19 @@ type stateView struct {
 	// TimeForeign: another tool's timesyncd drop-in. Shown because netgov's file outranks a
 	// lower-numbered one silently — see foreignTimeDropIns.
 	TimeForeign []string `json:"time_foreign"`
+
+	// The htpdate dependency, carried to the panel because netgov DETECTS that tool and never
+	// ships it (operator's ruling, n-840): a surface that offers a source must also say where the
+	// source comes from, or it is asking for a decision with the facts withheld.
+	HtpWhat     string   `json:"htp_what"`
+	HtpFrom     string   `json:"htp_from"`
+	HtpNeed     string   `json:"htp_need"`
+	HtpWhyMin   string   `json:"htp_whymin"`
+	HtpHere     string   `json:"htp_here"`
+	HtpUsable   bool     `json:"htp_usable"`
+	HtpWhyNot   string   `json:"htp_whynot"`
+	TimeAsked   []string `json:"time_asked"`
+	TimeLive    []string `json:"time_live"`
 	TimeGateway string   `json:"time_gateway"`
 
 	// ClaimArmed is the ADDRESS ARBITER's arm flag — deliberately separate from Armed above,
@@ -219,6 +232,13 @@ func buildView() stateView {
 	}
 	v.TimeGateway = defaultGateway4()
 	v.TimeForeign = foreignTimeDropIns()
+	v.HtpWhat, v.HtpFrom = htpdateWhat, htpdateSource+", owner "+htpdateOwner
+	v.HtpNeed = "htpdate-fallback/" + htpdateMinVersion + " or newer at " + strings.Join(htpdateCandidates, " or ")
+	v.HtpWhyMin, v.HtpHere = htpdateWhyMin, htpdateVersion()
+	v.HtpUsable, v.HtpWhyNot = htpdateUsable()
+	// asked vs live is the 2.37 lesson on the panel: the file netgov wrote is not evidence about
+	// what the client is using, because systemd concatenates NTP= across drop-ins.
+	v.TimeAsked, v.TimeLive = v.TimeSources, systemNTPServers()
 	v.MetricGovernance = governanceLines(st)
 	v.BinaryReplaced, _ = runningBinaryReplaced()
 	if cl := claimForActive(st); cl != nil {
@@ -1066,6 +1086,11 @@ small{color:var(--mut)}
 <button onclick="timeProbe()" title="ask each source for the time; stratum 16 = it cannot reach its own upstream">⟲ probe sources</button>
 <small id="tnote"></small></div>
 <div id="tprobe" class="mut" style="padding:2px 14px 8px"></div>
+<div id="tlive" class="mut" style="padding:2px 14px 6px"></div>
+<details style="padding:2px 14px 8px"><summary id="thtpsum" class="mut">htpdate source — a separate install, not shipped with netgov</summary>
+<div class="mut" style="padding:6px 0 0"><div><b>what</b> <span id="thw"></span></div>
+<div><b>from</b> <span id="thf"></span></div><div><b>need</b> <span id="thn"></span></div>
+<div id="thstate" style="padding-top:4px"></div><div id="thwhy"></div></div></details>
 <small style="display:block;padding:2px 14px 10px">A host's clock is its own business: this card never reads or writes a router's
 configuration. <b>NTP=yes with synchronised=no means the client is running and nothing has answered it</b> — the state a
 machine sits in indefinitely while its clock drifts on the RTC alone.</small></section>
@@ -1195,6 +1220,19 @@ function renderTime(){const b=$('#tbadge');if(!b)return;
   if(S.ntp_from)n+=' · from '+S.ntp_from;
   if((S.time_sources||[]).length)n+=' · declared: '+S.time_sources.join(' ');
   if(S.time_dropin)n+=' · netgov drop-in installed';
+  const live=(S.time_live||[]),asked=(S.time_asked||[]);
+  const same=live.length===asked.length&&asked.every(x=>live.includes(x));
+  $('#tlive').innerHTML = live.length
+    ? (asked.length&&!same
+       ? '<b>⚠ the client is using: '+live.join(' ')+'</b> — not what netgov asked for ('+asked.join(' ')+
+         '). systemd CONCATENATES NTP= across drop-ins and prefers the earliest; netgov resets the list to prevent that, so if this stands, press Apply.'
+       : 'client is using: '+live.join(' ')) : '';
+  $('#thw').textContent=S.htp_what||'';$('#thf').textContent=S.htp_from||'';$('#thn').textContent=S.htp_need||'';
+  $('#thstate').innerHTML = S.htp_usable
+    ? 'installed here: <b>'+(S.htp_here||'?')+'</b> — answering <code>--report</code> ✓'
+    : '<b>not usable here: '+(S.htp_whynot||'?')+'</b>'+(S.htp_here&&S.htp_here!=='unknown'?' (found: '+S.htp_here+')':'');
+  $('#thwhy').textContent = S.htp_usable?'':('why the minimum matters: '+(S.htp_whymin||''));
+  $('#thtpsum').textContent = 'htpdate source — a separate install, not shipped with netgov'+(S.htp_usable?' · present and working':' · NOT AVAILABLE HERE');
   if(S.ntp_enabled&&!S.ntp_synced)n+='  ⚠ running, and nothing has answered it';
   if((S.time_foreign||[]).length)n+='  ⚠ another tool also sets a source here: '+S.time_foreign.join(', ')+
     (S.time_mode!=='unmanaged'?" — netgov's drop-in outranks it (Unmanaged gives it back)":'');

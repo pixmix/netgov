@@ -72,6 +72,55 @@ var htpdateCandidates = []string{
 	"/usr/sbin/htpdate-fallback",
 }
 
+// The dependency, stated where the choice is made (operator's ruling, n-840): netgov DETECTS this
+// tool, it does not ship or install it, so a panel that offers the source and not its provenance
+// asks for a decision it has withheld the facts for.
+const (
+	htpdateMinVersion = "1.3"
+	htpdateOwner      = "c-001 (debug-workspace)"
+	htpdateSource     = "~/dev/debug/tools/htpdate-fallback"
+	htpdateWhat       = "reads the HTTPS Date header from three independent hosts and takes the consensus — TCP, so it works on a path that does not carry UDP 123"
+	htpdateWhyMin     = "1.1 ignores --report, cannot take its lock as a non-root user, prints nothing and EXITS 0 — so an old build and no build at all look identical to a caller that trusts the exit status"
+)
+
+// htpdateVersion reads the installed build's declared version: `--version` first, then the
+// artefact marker in the file, because the build that most needs identifying is the OLD one and it
+// may not answer --version at all.
+func htpdateVersion() string {
+	p := htpdatePath()
+	if p == "" {
+		return ""
+	}
+	if out, err := run(p, "--version"); err == nil {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, "htpdate-fallback/") {
+				return strings.TrimSpace(l)
+			}
+		}
+	}
+	if b, err := os.ReadFile(p); err == nil {
+		for _, l := range strings.Split(string(b), "\n") {
+			if i := strings.Index(l, "artefact-version:"); i >= 0 {
+				return strings.TrimSpace(l[i+len("artefact-version:"):])
+			}
+		}
+	}
+	return "unknown"
+}
+
+// htpdateUsable: installed AND actually answering --report. Deliberately a MEASUREMENT, not a
+// version-string comparison — the version is what the file claims, and what matters is whether the
+// contract answers. A build that says 1.3 and cannot report is unusable; the panel says which.
+func htpdateUsable() (bool, string) {
+	if htpdatePath() == "" {
+		return false, "not installed"
+	}
+	if _, err := htpdateRunReport(""); err != nil {
+		return false, err.Error()
+	}
+	return true, ""
+}
+
 func htpdatePath() string {
 	for _, p := range htpdateCandidates {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
@@ -301,6 +350,33 @@ func timesyncdState() (enabled, synced bool, server string) {
 	return
 }
 
+// systemNTPServers is the list the CLIENT is actually using — the merged result of every drop-in,
+// which is the only place the concatenation behaviour is visible. The file netgov wrote is not
+// evidence about this; that was the 2.37 defect.
+func systemNTPServers() []string {
+	out, err := run("timedatectl", "show-timesync", "--property=SystemNTPServers")
+	if err != nil {
+		return nil
+	}
+	_, v, _ := strings.Cut(strings.TrimSpace(out), "=")
+	return strings.Fields(v)
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ca, cb := append([]string(nil), a...), append([]string(nil), b...)
+	sort.Strings(ca)
+	sort.Strings(cb)
+	for i := range ca {
+		if ca[i] != cb[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // defaultGateway4 returns the host's current IPv4 default gateway, or "". It is READ, never
 // stored: `netgov time set server --gateway` resolves it once at the moment the operator asks,
 // so no gateway address is ever baked into netgov's state or its source.
@@ -511,9 +587,20 @@ func timeApplyRoot(st *State) {
 		fmt.Fprintln(os.Stderr, "netgov: no time source to write")
 		os.Exit(2)
 	}
+	// ⚠️ THE EMPTY `NTP=` IS LOAD-BEARING AND IT IS THE WHOLE REASON THIS FILE WORKS.
+	// systemd CONCATENATES `NTP=` across drop-ins — it does not let a later file replace an earlier
+	// one — and the servers of the EARLIEST file are tried FIRST. So 2.37's file, which just set
+	// `NTP=<ours>`, was appended after another tool's `10-` drop-in and netgov's selection became a
+	// FALLBACK while the panel said it had taken effect. Measured on the dev host 2026-09-13:
+	// `SystemNTPServers=<the gateway> 0.pool.ntp.org …` after netgov applied the pool, and
+	// `ServerName=<the gateway>` — the other tool's server, still in use.
+	// An empty assignment RESETS the accumulated list, so ours is the whole list. Asserted below
+	// against the live `SystemNTPServers`, never inferred from the file having been written.
 	body := "# Written by netgov (" + artefactVersion + "). netgov owns THIS FILE ONLY;\n" +
 		"# `netgov time set unmanaged && netgov time apply` deletes it and restores the host's own config.\n" +
-		"[Time]\nNTP=" + strings.Join(srcs, " ") + "\n"
+		"# The bare `NTP=` RESETS the list systemd accumulates from earlier drop-ins; without it this\n" +
+		"# file only APPENDS and an earlier file's servers keep priority. Do not remove it.\n" +
+		"[Time]\nNTP=\nNTP=" + strings.Join(srcs, " ") + "\n"
 	if err := os.MkdirAll(filepath.Dir(timeDropIn), 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "netgov:", err)
 		os.Exit(1)
@@ -530,13 +617,29 @@ func timeApplyRoot(st *State) {
 	}
 	fmt.Println("netgov: time source =", strings.Join(srcs, " "))
 	for _, f := range foreignTimeDropIns() {
-		fmt.Println("  ⚠ overriding another tool's drop-in:", f, "— it is still on disk and takes effect again")
-		fmt.Println("    the moment netgov's policy is set to unmanaged. Nothing of theirs was edited.")
+		fmt.Println("  ⚠ superseding another tool's drop-in:", f)
+		fmt.Println("    Its file is untouched and takes effect again the moment netgov is set to unmanaged.")
 	}
 
-	// ASSERT THE EFFECT, do not assume it. A restart returns immediately and a source that
-	// cannot be reached leaves the host exactly as unsynchronised as before, silently — the
-	// state this whole feature was written to make visible.
+	// ASSERT THE EFFECT ON THE RIGHT AXIS. Synchronisation is not the check: a host that was
+	// already synchronised from somebody else's server stays synchronised, and reports success,
+	// while netgov's selection sits inert — which is exactly what 2.37 did. So check the LIST the
+	// client is actually using first, and only then whether it has synchronised.
+	if got := systemNTPServers(); len(got) > 0 {
+		if !sameStringSet(got, srcs) {
+			fmt.Println("  ⚠ THE CLIENT'S SERVER LIST IS NOT WHAT NETGOV ASKED FOR:")
+			fmt.Println("      asked:", strings.Join(srcs, " "))
+			fmt.Println("      live: ", strings.Join(got, " "))
+			for _, f := range foreignTimeDropIns() {
+				fmt.Println("      another drop-in is contributing:", f)
+			}
+			fmt.Println("      systemd CONCATENATES NTP= across drop-ins and prefers the earliest;")
+			fmt.Println("      netgov resets the list with a bare NTP= to prevent that. If this warning")
+			fmt.Println("      stands, something is stripping the reset — do not trust the panel until it clears.")
+		} else {
+			fmt.Println("  ✓ client's server list is netgov's:", strings.Join(got, " "))
+		}
+	}
 	deadline := time.Now().Add(12 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, synced, srv := timesyncdState(); synced {
@@ -633,6 +736,22 @@ func timeStatus(st *State) {
 	if st.Time != nil && st.Time.Mode == "htpdate" {
 		fmt.Println("  declared source: htpdate-fallback", dash(htpdatePath()), "(HTTPS Date, TCP)")
 	}
+	// The dependency is printed whenever it is RELEVANT — selected, or offered and missing — and
+	// never only in the failure case: a reader deciding between sources needs it before choosing.
+	if true { // ALWAYS: a reader choosing between sources needs the dependency before choosing,
+		// not only after picking the one that is missing (operator's ruling, n-840).
+		ok, why := htpdateUsable()
+		fmt.Println("  htpdate source (a SEPARATE INSTALL — netgov detects it, never ships it):")
+		fmt.Printf("    what:    %s\n", htpdateWhat)
+		fmt.Printf("    from:    %s, owner %s\n", htpdateSource, htpdateOwner)
+		fmt.Printf("    need:    htpdate-fallback/%s or newer at %s\n", htpdateMinVersion, strings.Join(htpdateCandidates, " or "))
+		if ok {
+			fmt.Printf("    here:    %s — answering --report ✓\n", htpdateVersion())
+		} else {
+			fmt.Printf("    here:    %s — UNUSABLE: %s\n", dash(htpdateVersion()), why)
+			fmt.Printf("    why:     %s\n", htpdateWhyMin)
+		}
+	}
 	// The two booleans, side by side and never merged: this line is the measurement that a
 	// whole LAN's clocks were wrong behind.
 	fmt.Printf("  client: NTP=%s  NTPSynchronized=%s", yn(enabled), yn(synced))
@@ -653,8 +772,11 @@ func timeStatus(st *State) {
 			fmt.Println("    " + f)
 		}
 		if st.Time != nil {
-			fmt.Println("    ⚠ netgov's 50- drop-in outranks a lower-numbered one. netgov wins because you")
-			fmt.Println("      chose netgov; `netgov time set unmanaged && netgov time apply` gives it back.")
+			fmt.Println("    netgov's drop-in RESETS the list (a bare `NTP=`) and then sets its own, so netgov's")
+			fmt.Println("    selection is the whole list — NOT because 50 sorts after 10: systemd CONCATENATES")
+			fmt.Println("    NTP= across drop-ins and prefers the EARLIEST, so without the reset netgov's choice")
+			fmt.Println("    would be a fallback behind this file. Nothing of theirs is edited, and")
+			fmt.Println("    `netgov time set unmanaged && netgov time apply` hands the property straight back.")
 		}
 	}
 }
