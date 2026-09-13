@@ -562,8 +562,26 @@ func cmdWeb(st *State, args []string) {
 		_ = r.ParseForm()
 		mode, via := r.FormValue("mode"), r.FormValue("via")
 		srv := splitCSV(r.FormValue("servers"))
+		// ⚠️ A MODE-LESS POST USED TO MEAN "unmanaged", which made any malformed or partial request
+		// silently WIPE the host's clock policy. And `via` alone must adjust the leg of whatever
+		// policy is STORED — never re-assert the mode the calling page happens to remember, because
+		// a page left open on a dashboard holds a snapshot and another hand may have changed the
+		// policy since. Asked after a peer found a production box's source changed under them and
+		// reasonably suspected netgov of re-applying stored state (n-841).
+		if mode == "" {
+			if via == "" || s.Time == nil {
+				writeJSON(w, map[string]any{"ok": false,
+					"out": "no mode given. To clear the policy say mode=unmanaged explicitly; a mode-less request is refused rather than guessed at"})
+				return
+			}
+			s.Time.Via = via
+			syncTimeRules(s)
+			_ = saveState(s, statePath())
+			writeJSON(w, buildView())
+			return
+		}
 		switch mode {
-		case "unmanaged", "":
+		case "unmanaged":
 			s.Time = nil
 		case "pool":
 			s.Time = &TimeSync{Mode: "pool", Servers: srv, Via: via}
@@ -1256,7 +1274,10 @@ async function setTimeSrv(){const v=$('#tsrv').value.trim();if(!v){alert('server
   S=await post('/api/time',{mode:'server',servers:v,via:$('#tvia').value||''});render();$('#tsrv').value='';
   log('clock policy declared — press Apply to realise it')}
 async function setTimeVia(){if(S.time_mode==='unmanaged')return;
-  S=await post('/api/time',{mode:S.time_mode,servers:(S.time_sources||[]).join(','),via:$('#tvia').value||''});render()}
+  // Send ONLY the leg. The mode belongs to whatever policy is stored now — this page may be a
+  // snapshot, and re-asserting a remembered mode is how an open tab overwrites someone else's
+  // change with a single unrelated click (n-841).
+  S=await post('/api/time',{via:$('#tvia').value||''});render()}
 async function timeApply(){log('applying clock policy…');const r=await post('/api/time-apply',{});log(r.out||(r.ok?'applied':'failed'));load()}
 async function timeProbe(){$('#tprobe').textContent='asking…';const r=await post('/api/time-probe',{});
   $('#tprobe').innerHTML=(r.rows||[]).map(x=>'<div>'+x.addr+' — '+(x.ok
