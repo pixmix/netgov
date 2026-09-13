@@ -406,6 +406,24 @@ nothing.** netgov therefore keys on **the presence of a parseable line, never th
 `rc=0` with no output is the most convincing way for a tool to tell you nothing. A host in that
 state reads `unavailable`, with the reason.
 
+### Who changed it — the audit line (2.40)
+
+Every applied clock policy writes one line to the system journal:
+
+```
+netgov: time-policy applied by=panel user=pm mode=server via=- servers=10.0.0.1
+```
+
+`by=` is the **surface** — `panel` or `cli` — because a dashboard click and a deliberate command are
+different events and the difference is what you need when two people administer one host. Read it
+with `journalctl -t netgov`.
+
+⚠️ **netgov records; it does not own the record.** Per the operator's ruling of 2026-09-13,
+configuration is recorded by the project in charge of the thing — for hosts, that is the host
+custodian, not this tool's author. netgov's duty is to make the change legible *on the machine*, in
+the place a custodian already reads, so their record derives from the host instead of from a
+conversation.
+
 ### `probe` is the check, and stratum is why
 
 ```

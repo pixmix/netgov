@@ -488,14 +488,18 @@ func cmdTime(st *State, args []string) {
 
 	case "apply":
 		if os.Geteuid() == 0 {
-			timeApplyRoot(st)
+			timeApplyRoot(st, "cli")
 			saveStateKeepOwner(st, statePath())
 			return
 		}
 		sudoSelf("__time-apply")
 
 	case "__apply":
-		timeApplyRoot(st)
+		timeApplyRoot(st, "cli")
+		saveStateKeepOwner(st, statePath())
+
+	case "__apply-web":
+		timeApplyRoot(st, "panel")
 		saveStateKeepOwner(st, statePath())
 
 	default:
@@ -522,10 +526,46 @@ func syncTimeRules(st *State) {
 	}
 }
 
-func timeApplyRoot(st *State) {
+// auditPolicy writes ONE line to the system journal for every applied clock policy, naming the
+// surface it came from and the user behind it.
+//
+// WHY netgov emits this rather than keeping its own log: the operator's ruling (2026-09-13) is that
+// **configuration is recorded by ONE project — the one in charge of the thing** — and the hosts,
+// including restoring them, are c-001's. netgov is the instrument, not the registrar. So the tool's
+// duty is to make the change LEGIBLE ON THE HOST, in the place a host custodian already reads, so
+// their record can be derived from the machine instead of reconstructed from a conversation.
+//
+// 📌 The surface matters as much as the value: `by=panel` and `by=cli` distinguish a dashboard click
+// from a deliberate command, which is precisely the question a peer could not answer about a
+// production box this afternoon (n-841) — and could not, because nothing wrote it down.
+func auditPolicy(surface, what string) {
+	line := policyAuditLine(surface, os.Getenv("SUDO_USER"), os.Geteuid(), what)
+	if _, err := run("logger", "-t", "netgov", line); err != nil {
+		// Never fail an apply because the journal is unavailable — but say so, so the absence of
+		// a record is itself visible rather than silent.
+		fmt.Fprintln(os.Stderr, "netgov: could not write the audit line:", err)
+	}
+	fmt.Println("  audit:", line)
+}
+
+// policyAuditLine is the record's format, separated so it can be tested: a line whose fields a
+// host custodian can grep is the difference between a record and a diary.
+func policyAuditLine(surface, sudoUser string, uid int, what string) string {
+	who := sudoUser
+	if who == "" {
+		who = fmt.Sprintf("uid=%d", uid)
+	}
+	if surface == "" {
+		surface = "unknown"
+	}
+	return fmt.Sprintf("time-policy applied by=%s user=%s %s", surface, who, what)
+}
+
+func timeApplyRoot(st *State, surface string) {
 	// UNMANAGED: remove our drop-in and hand the host back. Nothing else to undo — netgov never
 	// wrote anything else.
 	if st.Time == nil {
+		auditPolicy(surface, "mode=unmanaged")
 		if err := os.Remove(timeDropIn); err == nil {
 			fmt.Println("netgov: removed", timeDropIn, "— host is back on its own timesyncd config")
 			_, _ = run("systemctl", "restart", "systemd-timesyncd")
@@ -577,6 +617,7 @@ func timeApplyRoot(st *State) {
 		if bind != "" {
 			fmt.Println("  bound to", bind, "— for this source a leg pin is the tool's own BIND (curl --interface), not a route rule")
 		}
+		auditPolicy(surface, "mode=htpdate via="+dash(st.Time.Via)+" rc="+fmt.Sprint(rc))
 		fmt.Println("netgov: time source = htpdate-fallback (HTTPS Date; TCP, so a path that eats UDP 123 does not matter)")
 		fmt.Println("  ⚠️ it stands down by itself when NTPSynchronized=yes — that is its rule, not netgov's, and netgov does not override it")
 		return
@@ -615,6 +656,7 @@ func timeApplyRoot(st *State) {
 	if _, err := run("systemctl", "restart", "systemd-timesyncd"); err != nil {
 		fmt.Fprintln(os.Stderr, "netgov: systemd-timesyncd restart failed:", err)
 	}
+	auditPolicy(surface, "mode="+st.Time.Mode+" via="+dash(st.Time.Via)+" servers="+strings.Join(srcs, ","))
 	fmt.Println("netgov: time source =", strings.Join(srcs, " "))
 	for _, f := range foreignTimeDropIns() {
 		fmt.Println("  ⚠ superseding another tool's drop-in:", f)

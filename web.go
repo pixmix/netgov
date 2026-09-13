@@ -804,7 +804,9 @@ func cmdWeb(st *State, args []string) {
 	}
 	mux.HandleFunc("/api/apply", priv("__apply"))
 	mux.HandleFunc("/api/reset", priv("__reset"))
-	mux.HandleFunc("/api/time-apply", priv("__time-apply"))
+	// A DISTINCT VERB for the panel, so the audit line can say which surface made the change.
+	// Both paths run the same code; only the recorded provenance differs.
+	mux.HandleFunc("/api/time-apply", priv("__time-apply-web"))
 
 	fmt.Printf("netgov dashboard on http://%s\n", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {

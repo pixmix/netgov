@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -177,5 +178,19 @@ func TestHtpdateReportParse(t *testing.T) {
 	}
 	if parseHtpdateLine("") != nil {
 		t.Fatal("empty output must never parse as a measurement")
+	}
+}
+
+// The audit line is a record another project reads, so its shape is part of the contract: the
+// SURFACE must be present and must never be blank, because "who changed this" was exactly the
+// question that could not be answered about a production box (n-841).
+func TestPolicyAuditLine(t *testing.T) {
+	got := policyAuditLine("panel", "someone", 0, "mode=server servers=10.0.0.1")
+	want := "time-policy applied by=panel user=someone mode=server servers=10.0.0.1"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if l := policyAuditLine("", "", 1000, "mode=pool"); !strings.Contains(l, "by=unknown") || !strings.Contains(l, "user=uid=1000") {
+		t.Fatalf("an unattributed change must still be attributable to something: %q", l)
 	}
 }
