@@ -970,22 +970,69 @@ func devProfile(dev string) string {
 }
 
 // profileForIface finds the connection bound to an interface even when nothing is active on it.
+//
+// TWO forks, whatever the number of saved profiles (2.42). It used to list the names and then ask
+// nmcli once PER PROFILE for its interface-name — 54 of the 116 processes one dashboard refresh
+// started on .153, over a collection that grows every time the operator joins a new Wi-Fi network
+// while travelling. `nmcli connection show <uuid>…` answers for many profiles in one call, blank
+// line between them; UUIDs are the handles because a NAME may contain the separator.
 func profileForIface(dev string) string {
-	out, err := run("nmcli", "-t", "-f", "NAME", "connection", "show")
+	list, err := run("nmcli", "-t", "-f", "UUID,NAME", "connection", "show")
 	if err != nil {
 		return ""
 	}
-	for _, name := range strings.Split(out, "\n") {
-		name = strings.TrimSpace(strings.ReplaceAll(name, "\\:", ":"))
-		if name == "" {
+	var uuids, names []string
+	for _, ln := range strings.Split(list, "\n") {
+		u, n, ok := strings.Cut(strings.TrimSpace(ln), ":")
+		if !ok || u == "" {
 			continue
 		}
-		if v, e := run("nmcli", "-g", "connection.interface-name", "connection", "show", name); e == nil &&
-			strings.TrimSpace(v) == dev {
-			return name
+		uuids = append(uuids, u)
+		names = append(names, nmTerseUnescape(n))
+	}
+	if len(uuids) == 0 {
+		return ""
+	}
+	// Parse even on error: a profile deleted between the two calls makes nmcli exit non-zero while
+	// still answering for all the others, and the old per-profile loop survived that race too.
+	out, _ := run(append([]string{"nmcli", "-t", "-f", "connection.uuid,connection.interface-name",
+		"connection", "show"}, uuids...)...)
+	bound, cur := map[string]bool{}, ""
+	for _, ln := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(ln), ":")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "connection.uuid":
+			cur = strings.TrimSpace(v)
+		case "connection.interface-name":
+			if cur != "" && strings.TrimSpace(v) == dev {
+				bound[cur] = true
+			}
+		}
+	}
+	for i, u := range uuids { // listing order, as before: the first bound profile wins
+		if bound[u] {
+			return names[i]
 		}
 	}
 	return ""
+}
+
+// nmTerseUnescape undoes nmcli -t's field escaping (`\:` and `\\`).
+func nmTerseUnescape(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 type claimVerdict struct {

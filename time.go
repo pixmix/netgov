@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -111,6 +112,43 @@ func htpdateVersion() string {
 // htpdateUsable: installed AND actually answering --report. Deliberately a MEASUREMENT, not a
 // version-string comparison — the version is what the file claims, and what matters is whether the
 // contract answers. A build that says 1.3 and cannot report is unusable; the panel says which.
+// htpdateUsableForView is htpdateUsable for the DASHBOARD, re-measured at most every
+// htpViewFreshOK (or htpViewFreshFail after a failure) — 2.42, lean-execution/1.
+//
+// `--report` is a real measurement and stays one: it asks three HTTPS servers for their Date
+// header. But the panel ran it on EVERY refresh — 17 of the 54 processes a 2.42 refresh still forked
+// on .153, three outbound HTTPS requests and one journal line (the tool logs each report) every 15 s
+// for every open tab — to answer a question whose answer changes when someone installs or breaks
+// a tool, not between two refreshes. The CLI (`netgov time`) and the probe button still measure
+// NOW; the panel says how old its verdict is, so a cached answer never passes for a fresh one.
+var htpView struct {
+	sync.Mutex
+	at  time.Time
+	ok  bool
+	why string
+}
+
+const (
+	htpViewFreshOK   = 5 * time.Minute
+	htpViewFreshFail = time.Minute // a failure is re-checked sooner: it is the state someone is fixing
+)
+
+var htpMeasure = htpdateUsable // a variable so the freshness rule can be tested without the tool
+
+func htpdateUsableForView() (bool, string, time.Time) {
+	htpView.Lock()
+	defer htpView.Unlock()
+	ttl := htpViewFreshOK
+	if !htpView.ok {
+		ttl = htpViewFreshFail
+	}
+	if htpView.at.IsZero() || time.Since(htpView.at) >= ttl {
+		htpView.ok, htpView.why = htpMeasure()
+		htpView.at = time.Now()
+	}
+	return htpView.ok, htpView.why, htpView.at
+}
+
 func htpdateUsable() (bool, string) {
 	if htpdatePath() == "" {
 		return false, "not installed"

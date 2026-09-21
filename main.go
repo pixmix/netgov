@@ -33,6 +33,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -297,7 +298,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.41"
+const artefactVersion = "netgov/2.42"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -659,9 +660,219 @@ func saveState(st *State, path string) error {
 	return os.WriteFile(path, b, 0o644)
 }
 
+// run executes argv and returns its trimmed combined output. While a dashboard view is being built
+// it answers a repeated READ-ONLY `ip`/`nmcli` query from that build's memo instead of forking
+// again, and any command that may change the host empties the memo first (2.42, see readMemo).
 func run(argv ...string) (string, error) {
+	if len(argv) == 0 {
+		return "", fmt.Errorf("run: empty argv")
+	}
+	switch execClass(argv) {
+	case classRead:
+		if out, err, ok := readMemo.get(argv); ok {
+			return out, err
+		}
+		out, err := execRun(argv)
+		readMemo.put(argv, out, err)
+		return out, err
+	case classMutate:
+		readMemo.clear()
+	}
+	return execRun(argv)
+}
+
+// execRun is the one place netgov forks a helper; a variable so the cost tests can count calls.
+var execRun = func(argv []string) (string, error) {
 	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// readMemo exists because of lean-execution/1 (operator, 2026-09-21: "event driven … not pollings
+// starting dozens of processes"). Measured on .153 with 2.41, ONE dashboard refresh started 116
+// processes and cost ~2.5 s of CPU, every 15 s, for every open tab: `ip -j addr show` ran 11 times
+// and one Wi-Fi scan listing 5 times, each helper asking again for what the one before it had just
+// been told. The memo is live ONLY inside buildView (viewBegin/viewEnd), holds only classRead
+// answers, and is emptied by any classMutate command from any goroutine — so a read after a write
+// is always fresh, even when a POST handler runs while a view is being built.
+var readMemo = &memo{}
+
+type memoEntry struct {
+	out string
+	err error
+}
+
+type memo struct {
+	mu     sync.Mutex
+	active int // open view builds; 0 = the memo is off and caches nothing
+	m      map[string]memoEntry
+}
+
+func memoKey(argv []string) string { return strings.Join(argv, "\x00") }
+
+func (c *memo) begin() {
+	c.mu.Lock()
+	if c.active == 0 || c.m == nil {
+		c.m = map[string]memoEntry{}
+	}
+	c.active++
+	c.mu.Unlock()
+}
+
+func (c *memo) end() {
+	c.mu.Lock()
+	if c.active--; c.active <= 0 {
+		c.active, c.m = 0, nil
+	}
+	c.mu.Unlock()
+}
+
+func (c *memo) get(argv []string) (string, error, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active == 0 {
+		return "", nil, false
+	}
+	e, ok := c.m[memoKey(argv)]
+	return e.out, e.err, ok
+}
+
+func (c *memo) put(argv []string, out string, err error) {
+	c.mu.Lock()
+	if c.active > 0 && c.m != nil {
+		c.m[memoKey(argv)] = memoEntry{out, err}
+	}
+	c.mu.Unlock()
+}
+
+func (c *memo) clear() {
+	c.mu.Lock()
+	if c.m != nil {
+		c.m = map[string]memoEntry{}
+	}
+	c.mu.Unlock()
+}
+
+type execKind int
+
+const (
+	classMutate  execKind = iota // may change the host — the DEFAULT for anything not listed below
+	classRead                    // a pure `ip`/`nmcli` query: memoisable within one view build
+	classNeutral                 // a probe that reads the world and changes nothing: neither cached nor clearing
+)
+
+// execClass sorts a command for the memo. It is deliberately conservative: an unknown command is
+// treated as a mutation, because a cleared memo costs a fork and a stale answer costs the truth.
+func execClass(argv []string) execKind {
+	bin := argv[0]
+	if i := strings.LastIndexByte(bin, '/'); i >= 0 {
+		bin = bin[i+1:]
+	}
+	args := argv[1:]
+	switch bin {
+	case "ip":
+		obj, verb := ipObjVerb(args)
+		if obj == "" {
+			return classMutate
+		}
+		switch verb {
+		case "", "show", "list", "ls", "lst", "get":
+			return classRead
+		}
+		return classMutate
+	case "nmcli":
+		pos := nmcliPositional(args)
+		if len(pos) >= 2 {
+			switch pos[1] {
+			case "show", "status":
+				return classRead
+			case "wifi":
+				if len(pos) >= 3 && pos[2] == "list" && hasArg(args, "--rescan") && argAfter(args, "--rescan") == "no" {
+					return classRead
+				}
+			}
+		}
+		return classMutate
+	case "ping", "arping", "curl", "getent", "htpdate-fallback":
+		return classNeutral
+	case "timedatectl":
+		if len(args) == 0 || args[0] == "show" || args[0] == "status" || args[0] == "show-timesync" || args[0] == "timesync-status" {
+			return classNeutral
+		}
+	case "systemctl":
+		for _, a := range args {
+			switch a {
+			case "is-active", "is-enabled", "is-failed", "show", "status", "cat":
+				return classNeutral
+			}
+		}
+	case "iw":
+		for _, a := range args {
+			switch a {
+			case "set", "connect", "disconnect", "del", "add", "interface":
+				return classMutate
+			}
+		}
+		return classNeutral
+	case "ethtool":
+		if len(args) == 1 || (len(args) == 2 && (args[0] == "-P" || args[0] == "-i")) {
+			return classNeutral
+		}
+	}
+	return classMutate
+}
+
+// ipObjVerb returns iproute2's OBJECT and its verb, skipping the global options before them.
+func ipObjVerb(args []string) (string, string) {
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "-") {
+		switch args[i] {
+		case "-n", "-netns", "-b", "-batch", "-rc", "-rcvbuf", "-l", "-loops": // options that take a value
+			i++
+		}
+		i++
+	}
+	if i >= len(args) {
+		return "", ""
+	}
+	if i+1 < len(args) {
+		return args[i], args[i+1]
+	}
+	return args[i], ""
+}
+
+// nmcliPositional drops nmcli's global options (and the values of those that take one).
+func nmcliPositional(args []string) []string {
+	var pos []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			switch a {
+			case "-f", "--fields", "-g", "--get-values", "-e", "--escape", "-m", "--mode", "-c", "--colors", "-w", "--wait":
+				i++
+			}
+			continue
+		}
+		pos = append(pos, a)
+	}
+	return pos
+}
+
+func hasArg(args []string, a string) bool {
+	for _, x := range args {
+		if x == a {
+			return true
+		}
+	}
+	return false
+}
+
+func argAfter(args []string, a string) string {
+	for i, x := range args {
+		if x == a && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // ---- `ip -j` parsing ----
@@ -2385,6 +2596,7 @@ func runPriv(argv ...string) error {
 		_, err := run(argv...)
 		return err
 	}
+	readMemo.clear() // a privileged command is a change by definition; do not let a view build outlive it
 	cmd := exec.Command("sudo", append([]string{"-A"}, argv...)...)
 	cmd.Env = askpassEnv()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr

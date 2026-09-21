@@ -135,6 +135,7 @@ type stateView struct {
 	HtpHere     string   `json:"htp_here"`
 	HtpUsable   bool     `json:"htp_usable"`
 	HtpWhyNot   string   `json:"htp_whynot"`
+	HtpAgeS     int      `json:"htp_age_s"` // seconds since the verdict above was measured (2.42)
 	TimeAsked   []string `json:"time_asked"`
 	TimeLive    []string `json:"time_live"`
 	TimeGateway string   `json:"time_gateway"`
@@ -285,6 +286,8 @@ func famOf(u Uplink, fam string) famView {
 }
 
 func buildView() stateView {
+	readMemo.begin() // one answer per identical read-only query for the length of this build (2.42)
+	defer readMemo.end()
 	st := loadState(statePath())
 	v := stateView{DefaultV4: st.DefaultV4, DefaultV6: st.DefaultV6, Bridges: scanBridges(), WifiIf: wifiIfaces(),
 		Armed: st.Armed, Active: st.ActivePattern,
@@ -307,7 +310,9 @@ func buildView() stateView {
 	v.HtpWhat, v.HtpFrom = htpdateWhat, htpdateSource+", owner "+htpdateOwner
 	v.HtpNeed = "htpdate-fallback/" + htpdateMinVersion + " or newer at " + strings.Join(htpdateCandidates, " or ")
 	v.HtpWhyMin, v.HtpHere = htpdateWhyMin, htpdateVersion()
-	v.HtpUsable, v.HtpWhyNot = htpdateUsable()
+	var htpAt time.Time
+	v.HtpUsable, v.HtpWhyNot, htpAt = htpdateUsableForView()
+	v.HtpAgeS = int(time.Since(htpAt).Seconds())
 	// asked vs live is the 2.37 lesson on the panel: the file netgov wrote is not evidence about
 	// what the client is using, because systemd concatenates NTP= across drop-ins.
 	v.TimeAsked, v.TimeLive = v.TimeSources, systemNTPServers()
@@ -1329,6 +1334,8 @@ function renderTime(){const b=$('#tbadge');if(!b)return;
   $('#thstate').innerHTML = S.htp_usable
     ? 'installed here: <b>'+(S.htp_here||'?')+'</b> — answering <code>--report</code> ✓'
     : '<b>not usable here: '+(S.htp_whynot||'?')+'</b>'+(S.htp_here&&S.htp_here!=='unknown'?' (found: '+S.htp_here+')':'');
+  // The verdict is re-measured every few minutes, not every refresh (2.42) — so say how old it is.
+  if(S.htp_age_s!=null)$('#thstate').innerHTML += ' <small>(measured '+(S.htp_age_s<60?S.htp_age_s+' s':Math.round(S.htp_age_s/60)+' min')+' ago)</small>';
   $('#thwhy').textContent = S.htp_usable?'':('why the minimum matters: '+(S.htp_whymin||''));
   $('#thtpsum').textContent = 'htpdate source — a separate install, not shipped with netgov'+(S.htp_usable?' · present and working':' · NOT AVAILABLE HERE');
   if(S.ntp_enabled&&!S.ntp_synced)n+='  ⚠ running, and nothing has answered it';
@@ -1404,7 +1411,12 @@ function patEdit(n){const p=(S.patterns||[]).find(x=>x.name===n);if(!p)return;
 async function apply(){log('applying… (approve the sudo dialog on screen)');const r=await post('/api/apply',{});log(r.out||(r.ok?'applied':'failed'));load()}
 async function reset(){if(!confirm('Remove ALL netgov rules and restore the NetworkManager baseline?'))return;log('restoring…');const r=await post('/api/reset',{});log(r.out||'done');load()}
 load();
-setInterval(()=>{const a=document.activeElement;if(a&&/^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName))return;load()},15000);
+// A tab nobody is looking at does not poll (2.42, lean-execution/1). Each refresh costs its HOST
+// real work, and the operator keeps one tab per box open through forwarded ports — so a hidden tab
+// polling every 15 s was a permanent load on a machine nobody was watching. Becoming visible
+// refreshes at once, so nothing is lost but the work.
+setInterval(()=>{if(document.hidden)return;const a=document.activeElement;if(a&&/^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName))return;load()},15000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)load()});
 </script></body></html>`
 
 // helpHTML renders the embedded docs (UI.md + CLI.md) with a tiny client-side markdown

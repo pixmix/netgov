@@ -400,7 +400,8 @@ reports success while netgov's selection sits inert. `timedatectl show-timesync`
 dashboard therefore state the dependency wherever the choice is offered — what it is, where it comes
 from (`~/dev/debug/tools/htpdate-fallback`, owner c-001), the minimum version, and what the installed
 build here actually does. The panel reports **usability by measurement, not by version string**: a
-build that claims 1.3 and cannot answer `--report` reads as unusable, and says why.
+build that claims 1.3 and cannot answer `--report` reads as unusable, and says why. `netgov time`
+measures on every call; the dashboard reuses its verdict for up to 5 minutes and shows its age (2.42).
 
 `htpdate-fallback --report` measures the offset against three HTTPS `Date` headers **without
 touching the clock**, needs no root and takes no lock, so netgov calls it per candidate leg as your

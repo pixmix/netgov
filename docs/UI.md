@@ -3,8 +3,17 @@
 The dashboard is a single localhost page served by `netgov web`, usually from a
 systemd unit set up per box (`netgov install` does **not** create it — which is why the
 unit's name, scope and account vary between machines): **http://127.0.0.1:8474**. It mirrors the CLI — every
-control maps to a `netgov …` command. Status auto-refreshes every ~15 s (paused
-while you're typing in a field).
+control maps to a `netgov …` command. Status auto-refreshes every ~15 s — paused
+while you're typing in a field, and **not at all while the tab is hidden** (2.42); a tab
+that becomes visible refreshes at once.
+
+**What a refresh costs the host (2.42).** Each refresh runs real work on the machine
+the tab points at, so it is kept lean: a read-only `ip`/`nmcli` query is asked **once per
+refresh** however many cards need it (anything that may change the host clears that
+memo, so a read after a write is always fresh), and the saved-profile lookup costs two
+`nmcli` calls whatever the number of Wi-Fi networks the box remembers. Measured on a box
+with 53 saved profiles, per refresh: **116 → 37 processes, ~2.5 s → ~0.4 s of CPU, ~8 s
+→ ~0.5 s to answer**.
 
 > **Safety model.** netgov's routing engine only ever *adds* `ip rule`s in the
 > priority band 8000–29999 and routes in tables 100–199, and never edits your main
@@ -278,6 +287,12 @@ that differs from what netgov asked for — the file netgov wrote is not evidenc
 to get it (`~/dev/debug/tools/htpdate-fallback`, owner c-001), the minimum version, and whether the
 build on this host actually answers `--report` — measured, not read off a version string. The fold's
 summary line says *present and working* or *NOT AVAILABLE HERE* without being opened.
+
+That verdict is **re-measured every 5 minutes** (every minute while it is failing), not on each
+refresh, and it says how old it is — *(measured 2 min ago)*. A `--report` asks three HTTPS
+servers for the time and writes a journal line, which every 15 s per open tab was traffic and log
+noise for an answer that only changes when someone installs or breaks the tool (2.42). The probe
+button and `netgov time` still measure **now**.
 
 ---
 
