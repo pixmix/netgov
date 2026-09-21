@@ -11,13 +11,13 @@ State lives in `~/.config/netgov/state.json` (override with `NETGOV_STATE` or
 
 | Command | What it does |
 |---|---|
-| `netgov status` | live view: uplinks, rules, default, APs, bridges |
+| `netgov status` | live view: uplinks, rules, default, APs, bridges — the first line names the **host** and build (2.41) |
 | `netgov plan` | dry-run: print the `ip` plan, execute nothing |
 | `netgov apply` \| `refresh` | realise the config (root; idempotent) |
 | `netgov reset` | remove all netgov rules → pure NetworkManager baseline |
 | `netgov init` | auto-discover interfaces → seed uplinks |
 | `netgov web [--addr 127.0.0.1:8474]` | serve the dashboard (localhost only) |
-| `netgov install` | install the web service, NM re-apply hook, and failover unit |
+| `netgov install` | install the NM re-apply hook, the failover unit and the claim-watch timer — **not** the web service, which is set up per box (see UI.md) |
 
 ### Reading `apply`'s output (2.29)
 
@@ -169,6 +169,12 @@ netgov claim set <pattern> <address> [identity=<mac>] <dev:prio[:ssid,ssid]>…
 netgov claim clear <pattern>
 ```
 
+`claim set` is **the** way to declare a group. `pat-set` — with or without `--snapshot` —
+captures v4/v6/rules and never writes a claim, and `state.json` is live state the tool
+rewrites, not a file to author. Until 2.41 the built-in help did not name `claim set`, and
+an unknown verb (`claim add`, `claim help`) silently printed `status`; now it is refused
+with the grammar, and `claim status` on a pattern with no group says how to declare one.
+
 ### Two mechanisms — declare `identity=` and you get the better one (2.27+)
 
 |  | **identity-MAC** (`identity=…`) | **lease arbitration** (no `identity=`) |
@@ -197,6 +203,17 @@ guess — a swap it cannot undo is worse than no swap.
 
 Lease arbitration remains for claims with no `identity=`, and its rules below still apply
 to those.
+
+### What a failover costs — it is a re-address, not a seamless handover
+
+Moving the identity MAC resets the link and the new holder runs DHCP for the address from
+scratch, so **the address is unreachable for the length of that exchange**. Measured on a
+laptop with a USB Ethernet dongle and Wi-Fi (a laptop, netgov/2.40, 2026-09-21, the cable
+pulled for real in both directions): **about 20–25 s per transition**. The address itself
+never changes, so an established TCP connection normally resumes on retransmission —
+*inference, not measured* — while anything with a shorter timeout (a UDP stream, an
+interactive protocol with its own keepalive) sees an outage. Plan for a gap, not for
+continuity.
 
 Highest-priority **eligible** adapter wins. Eligibility is **carrier + association +
 gateway-answers-ARP-on-that-interface** (never NetworkManager's connectivity verdict — that

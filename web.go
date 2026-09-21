@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -166,6 +168,76 @@ type stateView struct {
 	// serving code older than what is installed. 2.24's page-vs-process check cannot see this —
 	// both halves come from the same process and agree perfectly while it runs stale code. (2.26)
 	BinaryReplaced bool `json:"binary_replaced"`
+
+	// RestartHint is the command that restarts THIS process, derived from its own cgroup (2.41).
+	// Only filled when BinaryReplaced — it is the remedy line of that banner.
+	RestartHint string `json:"restart_hint,omitempty"`
+
+	// Host is the running kernel's hostname, read per request (2.41). The page draws it into its
+	// title and heading, so the tab names the box whose DATA it shows even if a forward is moved.
+	Host string `json:"host"`
+}
+
+// restartHint names the command that restarts the process serving this page, read from
+// /proc/self/cgroup at request time (2.41).
+//
+// The banner used to say `systemctl --user restart netgov-web`, which is right for exactly one
+// deployment: the one it was written on. On a laptop where netgov-web runs under a service
+// account while the operator logs in as himself, the line answered "Unit netgov-web.service not
+// found" and he had to ask a peer (2026-09-21) — a remedy that fails is worse than none, because it reads as a second
+// fault. The process's own cgroup knows its unit, whether that unit is user- or system-scope, and
+// under whose manager — so ask it, rather than assume the account at the keyboard is the one
+// running the service.
+func restartHint() string {
+	b, _ := os.ReadFile("/proc/self/cgroup")
+	who := fmt.Sprintf("uid=%d", os.Getuid())
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		who = u.Username
+	}
+	return restartHintFrom(string(b), who, os.Getpid())
+}
+
+// restartHintFrom is restartHint's pure half, so each deployment shape can be tested.
+//
+//	0::/system.slice/netgov-web.service                                       system unit
+//	0::/user.slice/user-1001.slice/user@1001.service/app.slice/netgov-web.service  user unit
+//	0::/user.slice/user-1000.slice/session-4.scope                            run by hand
+func restartHintFrom(cgroup, who string, pid int) string {
+	path := ""
+	for _, ln := range strings.Split(cgroup, "\n") {
+		if strings.HasPrefix(ln, "0::") { // cgroup v2 — the unified hierarchy
+			path = strings.TrimSpace(ln[3:])
+		} else if path == "" && strings.Contains(ln, ":name=systemd:") { // v1 fallback
+			path = strings.TrimSpace(ln[strings.Index(ln, ":name=systemd:")+len(":name=systemd:"):])
+		}
+	}
+	segs := strings.Split(path, "/")
+	unit, userScope := "", false
+	for i := len(segs) - 1; i >= 0; i-- {
+		if strings.HasPrefix(segs[i], "user@") && strings.HasSuffix(segs[i], ".service") {
+			userScope = true
+			break // the user MANAGER is not the unit; anything above it is a session, not a service
+		}
+		if unit == "" && strings.HasSuffix(segs[i], ".service") {
+			unit = segs[i]
+		}
+	}
+	switch {
+	case unit == "":
+		return fmt.Sprintf("not a systemd service — stop PID %d (user %s) and start `netgov web` again", pid, who)
+	case userScope:
+		return fmt.Sprintf("as %s: systemctl --user restart %s   ·   from another login: sudo systemctl --user -M %s@ restart %s",
+			who, unit, who, unit)
+	default:
+		return "sudo systemctl restart " + unit
+	}
+}
+
+// renderPage stamps the running build and this host's name into the dashboard. html-escaped: a
+// hostname is operator-chosen text going into markup.
+func renderPage(host string) string {
+	out := strings.Replace(pageHTML, "__PAGE_BUILD__", artefactVersion+" "+artefactSource(), 1)
+	return strings.ReplaceAll(out, "__HOST__", html.EscapeString(host))
 }
 
 // patternRulesText renders a pattern's rules as one "selector via [fam]" line each
@@ -241,6 +313,10 @@ func buildView() stateView {
 	v.TimeAsked, v.TimeLive = v.TimeSources, systemNTPServers()
 	v.MetricGovernance = governanceLines(st)
 	v.BinaryReplaced, _ = runningBinaryReplaced()
+	if v.BinaryReplaced {
+		v.RestartHint = restartHint()
+	}
+	v.Host = hostLabel()
 	if cl := claimForActive(st); cl != nil {
 		v.ClaimPaths = claimPaths(cl, currentHolder(cl))
 		for _, l := range v.ClaimPaths {
@@ -380,8 +456,7 @@ func cmdWeb(st *State, args []string) {
 		// version — so it displays the new version number and the old UI, which is the most
 		// misleading combination available. The page can only detect that if it knows which
 		// build it was itself loaded from. (2.24)
-		serveStatic(w, r, "text/html; charset=utf-8",
-			strings.Replace(pageHTML, "__PAGE_BUILD__", artefactVersion+" "+artefactSource(), 1))
+		serveStatic(w, r, "text/html; charset=utf-8", renderPage(hostLabel()))
 	})
 	mux.HandleFunc("/help", func(w http.ResponseWriter, r *http.Request) {
 		serveStatic(w, r, "text/html; charset=utf-8", helpHTML)
@@ -1015,7 +1090,7 @@ WantedBy=timers.target
 }
 
 const pageHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>netgov</title><style>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>netgov · __HOST__</title><style>
 :root{--bg:#0e0f12;--fg:#d7dae0;--mut:#7a8290;--ln:#2a2e36;--ok:#5fd68a;--no:#e06c75;--acc:#6fb3ff;--warn:#e5a24a}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 header{padding:14px 20px;border-bottom:1px solid var(--ln);display:flex;align-items:center;gap:14px}
@@ -1037,7 +1112,7 @@ input,select{background:#16181d;color:var(--fg);border:1px solid var(--ln);borde
 #log{white-space:pre-wrap;color:var(--mut);padding:10px 14px;font-size:12px}
 small{color:var(--mut)}
 </style></head><body>
-<header><h1>NETGOV</h1><span class="mut" id="ver" title="the build that drew this page">…</span><span class="mut" id="sub">host switchboard</span>
+<header><h1>NETGOV · <span id="host">__HOST__</span></h1><span class="mut" id="ver" title="the build that drew this page">…</span><span class="mut" id="sub">host switchboard</span>
 <span style="flex:1"></span><button class="go" onclick="apply()">APPLY ▸</button>
 <button onclick="load()" title="refresh status">↻ refresh</button>
 <a href="/help" target="_blank" title="open the help page" style="color:var(--mut);border:1px solid var(--ln);border-radius:4px;padding:3px 10px;text-decoration:none;margin-left:6px">? help</a></header>
@@ -1139,6 +1214,9 @@ function fcell(f){if(!f.up)return '<span class="down">—</span>';
 // bug must announce itself rather than truncate the page: partial UI that looks whole is the worst
 // failure mode a status dashboard has.
 function render(){
+ // The heading names the box whose DATA this is, refreshed from /api/state every load — a
+ // forwarded port can be re-pointed at another host while this tab stays open. (2.41)
+ if(S&&S.host){const h=$('#host');if(h&&h.textContent!==S.host)h.textContent=S.host;const t='netgov · '+S.host;if(document.title!==t)document.title=t}
  try{ renderBody() }catch(e){
    log('RENDER ERROR: '+(e&&e.message?e.message:e)+' — the page below may be incomplete. This is a bug; the data in /api/state is unaffected.');
    const v=$('#ver'); if(v&&S&&S.version)v.textContent=S.version;
@@ -1154,7 +1232,7 @@ function checkStale(){
  if(!PAGE_BUILD||PAGE_BUILD.indexOf("__")===0||running.trim()==="")return;
  if(S.binary_replaced){staleBar('&#9888; netgov-web is running <b>'+running.trim()+
    '</b> but the binary on disk has been REPLACED since it started — the service is serving old code. '+
-   '<code>systemctl --user restart netgov-web</code>');return}
+   '<code>'+(S.restart_hint||'restart netgov-web').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</code>');return}
  if(running.trim()===PAGE_BUILD.trim())return;
  staleBar('&#9888; This dashboard was loaded from <b>'+PAGE_BUILD+'</b> but the service is now running <b>'+running.trim()+
    '</b> — the controls you see are from the OLD build. <button onclick="location.reload(true)" style="margin-left:8px">Reload</button>');

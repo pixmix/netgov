@@ -1742,7 +1742,7 @@ func claimFormString(cl *Claim) string {
 // author. A claim group IS configuration, so it needs a real setter.
 func claimSet(st *State, sp string, args []string) {
 	if len(args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: netgov claim set <pattern> <address> <dev:prio[:ssid,ssid]> [more...]")
+		fmt.Fprintln(os.Stderr, "usage: netgov claim set <pattern> <address> [identity=<mac>] <dev:prio[:ssid,ssid]> [more...]")
 		os.Exit(1)
 	}
 	name, addr, specs := args[0], args[1], args[2:]
@@ -1817,6 +1817,39 @@ func claimClear(st *State, sp string, args []string) {
 	os.Exit(1)
 }
 
+// claimVerbs are the verbs cmdClaim dispatches; `tick` is the timer's entry point, not a verb a
+// person types, so the help leaves it out and the test knows why.
+var claimVerbs = []string{"status", "eval", "apply", "set", "clear", "arm", "disarm", "tick"}
+
+func claimVerbKnown(v string) bool {
+	for _, k := range claimVerbs {
+		if v == k {
+			return true
+		}
+	}
+	return false
+}
+
+const claimUsage = `usage: netgov claim [status|eval|apply|arm|disarm]
+       netgov claim set <pattern> <address> [identity=<mac>] <dev:prio[:ssid,ssid]>...
+       netgov claim clear <pattern>
+`
+
+// claimInertMsg answers `claim status` when there is nothing to arbitrate — and says how to
+// declare a group, because that is the moment the reader is looking for the verb. (2.41, n-1001)
+func claimInertMsg(active string) string {
+	return fmt.Sprintf("no claim group on the active pattern (%s) — arbitration inert\n"+
+		"  declare one: netgov claim set %s <address> [identity=<mac>] <dev:prio[:ssid,ssid]>...\n",
+		orDash(active), orPlaceholder(active, "<pattern>"))
+}
+
+func orPlaceholder(s, ph string) string {
+	if s == "" {
+		return ph
+	}
+	return s
+}
+
 // cmdClaim implements `netgov claim [status|eval|apply|set|clear|arm|disarm]`.
 func cmdClaim(st *State, args []string) {
 	sub := "status"
@@ -1824,6 +1857,13 @@ func cmdClaim(st *State, args []string) {
 		sub = args[0]
 	}
 	cl := claimForActive(st)
+
+	// An unknown verb used to fall through to `status`, so `claim add …` or `claim help` printed
+	// "no claim group — arbitration inert" and looked like an answer about the box. (2.41)
+	if !claimVerbKnown(sub) {
+		fmt.Fprintf(os.Stderr, "netgov claim: unknown verb %q\n%s", sub, claimUsage)
+		os.Exit(2)
+	}
 
 	switch sub {
 	case "set":
@@ -1878,7 +1918,7 @@ func cmdClaim(st *State, args []string) {
 	}
 
 	if cl == nil {
-		fmt.Printf("no claim group on the active pattern (%s) — arbitration inert\n", orDash(st.ActivePattern))
+		fmt.Print(claimInertMsg(st.ActivePattern))
 		return
 	}
 	enforcing, lines := claimEnforcement()

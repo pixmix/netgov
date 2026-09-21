@@ -297,7 +297,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.40"
+const artefactVersion = "netgov/2.41"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -1642,6 +1642,7 @@ func cmdInit(st *State) {
 }
 
 func cmdStatus(st *State) {
+	fmt.Println(statusHeader())
 	if len(st.APs) > 0 {
 		fmt.Println("ACCESS POINTS (serving; uplink shadowed)")
 		for _, a := range st.APs {
@@ -2295,6 +2296,22 @@ func patternReallyDown(st *State, p *Pattern) bool {
 	return true
 }
 
+// hostLabel is the running kernel's hostname, read when asked (2.41). DISPLAY ONLY, and never
+// stored: netgov is driven on several boxes at once through forwarded dashboards that were
+// otherwise identical, so "which box is this?" must be on the page — but a name copied into state
+// is wrong the moment a box is renamed or its state is restored onto another machine, and anything
+// that KEYED on it would turn a rename into a config change.
+func hostLabel() string {
+	h, err := os.Hostname()
+	if err != nil || strings.TrimSpace(h) == "" {
+		return "(hostname unreadable)"
+	}
+	return h
+}
+
+// statusHeader is the first line of `netgov status`: which machine, which build.
+func statusHeader() string { return "HOST " + hostLabel() + "   " + artefactVersion }
+
 // activatePattern copies a pattern's snapshot into the live State (does NOT apply).
 func activatePattern(st *State, p *Pattern) {
 	st.DefaultV4 = normDefault(p.V4)
@@ -2539,8 +2556,14 @@ func roledLoop(sp string) {
 	}
 }
 
-func usage() {
-	fmt.Println(`netgov — host multi-homing / policy-routing switchboard
+func usage() { fmt.Println(usageText) }
+
+// usageText is a const so a test can hold it to the verbs the dispatchers really accept (2.41).
+// `claim set` had existed since 2.1 — its own comment says it exists so nobody hand-edits
+// state.json — and this text never named it, so on 2026-09-21 a peer configuring a new box read
+// the help, concluded there was no verb, and hand-edited state.json (n-1001). A verb the help does
+// not name is, to the reader, a verb that does not exist.
+const usageText = `netgov — host multi-homing / policy-routing switchboard
   status                                       uplinks, rules, defaults (per family), bridges
   init                                         auto-detect interfaces -> seed uplinks
   uplink list|define <n> --dev <i> [--gw ip]|del
@@ -2559,10 +2582,13 @@ func usage() {
   claim [status|eval|apply|arm|disarm]         same-address arbitration for the ACTIVE pattern's
                                                claim group (one address, N adapters, priority);
                                                separate arm flag, boots disarmed
+  claim set <pattern> <address> [identity=<mac>] <dev:prio[:ssid,ssid]>...
+                                               declare a pattern's claim group (pat-set never
+                                               writes one; do not hand-edit state.json)
+  claim clear <pattern>                        remove it
   arm [--dry] | disarm                         root failover loop (auto pattern selection); boots disarmed
   time [status]                                clock policy: source, client state, offsets
   time set unmanaged|pool|server|htpdate       pick the source (host-local; no router involved)
            [--servers a,b] [--gateway] [--via <uplink>]
   time apply | probe [addr…]                   realise it (sudo -A) / ask each source for the time
-  web [--addr 127.0.0.1:8474] | install`)
-}
+  web [--addr 127.0.0.1:8474] | install`

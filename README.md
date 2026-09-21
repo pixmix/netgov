@@ -100,7 +100,7 @@ go build -o netgov .
 install -m755 netgov ~/bin/netgov        # or /usr/local/bin
 
 netgov init        # auto-discover devices -> seed uplinks
-netgov install     # optional: localhost web service + NetworkManager re-apply hook
+netgov install     # NetworkManager re-apply hook + failover unit + claim-watch timer (not the web service)
 ```
 
 ## CLI
@@ -187,7 +187,7 @@ netgov apply
 
 ## Web dashboard
 
-`netgov web` (or the `netgov install` service) serves a localhost-only dashboard
+`netgov web` (run it from a unit you set up on each box — `netgov install` does not) serves a localhost-only dashboard
 that mirrors the CLI: cards for uplinks, destination/source rules, the per-family
 default, access points, and patterns, with live status. Bind address is
 configurable; keep it on loopback unless you intend otherwise.

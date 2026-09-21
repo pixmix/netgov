@@ -1,7 +1,8 @@
 # netgov — Dashboard (UI) guide
 
-The dashboard is a single localhost page served by `netgov web` (or the
-`netgov-web` user service): **http://127.0.0.1:8474**. It mirrors the CLI — every
+The dashboard is a single localhost page served by `netgov web`, usually from a
+systemd unit set up per box (`netgov install` does **not** create it — which is why the
+unit's name, scope and account vary between machines): **http://127.0.0.1:8474**. It mirrors the CLI — every
 control maps to a `netgov …` command. Status auto-refreshes every ~15 s (paused
 while you're typing in a field).
 
@@ -41,6 +42,15 @@ while you're typing in a field).
 - **↻ refresh** — reload live status now.
 - The subtitle shows the current overall default (`v4=… v6=…`) and, when armed,
   `ARMED(mode)`.
+- The heading and the browser tab name the **host** (2.41) — read from the kernel on
+  every refresh, never stored — so a tab on a forwarded port (`:8475`, `:8476`, …) says
+  which box it is driving, and follows the data if the forward is re-pointed.
+- If the binary on disk was replaced while the service kept running, a banner says the
+  page is being served by old code, and gives the restart command **for the unit, scope
+  and account actually running it** (2.41) — read from the process's own cgroup, e.g.
+  `as svc: systemctl --user restart netgov-web.service`, with a `sudo … -M svc@`
+  form for a different login. Until 2.41 it always said `systemctl --user restart
+  netgov-web`, which fails on any box where the service runs under another account.
 
 ---
 
