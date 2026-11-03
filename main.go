@@ -298,7 +298,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.42"
+const artefactVersion = "netgov/2.43"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -912,6 +912,21 @@ func ipfam(fam string, rest ...string) []string {
 
 func devExists(dev string) bool { _, err := os.Stat("/sys/class/net/" + dev); return err == nil }
 
+// devPointToPoint reports IFF_POINTOPOINT (0x10) from sysfs — WireGuard, ppp, p2p tun.
+// Their in-table default must be `default dev <iface>` (the wg-quick convention):
+// `via <peer-ip>` is rejected by the kernel without `onlink` ("Nexthop has invalid
+// gateway"), and with NO default at all the domain pins silently fall through to main —
+// measured live on funnel1 2026-11-03: apply reported success, pins routed nowhere,
+// only the tunnel-counter check caught it.
+func devPointToPoint(dev string) bool {
+	b, err := os.ReadFile("/sys/class/net/" + dev + "/flags")
+	if err != nil {
+		return false
+	}
+	f, err := strconv.ParseUint(strings.TrimSpace(string(b)), 0, 64)
+	return err == nil && f&0x10 != 0
+}
+
 func devOperUp(dev string) bool {
 	b, err := os.ReadFile("/sys/class/net/" + dev + "/operstate")
 	if err != nil {
@@ -1296,7 +1311,10 @@ func planFamily(st *State, fam string) (clean, build [][]string) {
 		if n := linkNet(u.Dev, fam); n != "" {
 			build = append(build, ipfam(fam, "route", "add", n, "dev", u.Dev, "table", itoa(u.Table)))
 		}
-		if gw != "" {
+		if devPointToPoint(u.Dev) {
+			// p2p tunnel (WireGuard/ppp): device default, no nexthop — see devPointToPoint.
+			build = append(build, ipfam(fam, "route", "add", "default", "dev", u.Dev, "table", itoa(u.Table)))
+		} else if gw != "" {
 			build = append(build, ipfam(fam, "route", "add", "default", "via", gw, "dev", u.Dev, "table", itoa(u.Table)))
 		}
 		// v4 pins the ADDRESS (it is the host's identity there); v6 pins every global PREFIX,
