@@ -298,7 +298,7 @@ import (
 // could not see a pending upgrade. c-019 caught it from the outside (n-216) because a declared
 // version younger than the code it names is indistinguishable from being up to date — the exact
 // failure the policy was written to prevent, in the artefact that motivated the policy.
-const artefactVersion = "netgov/2.43"
+const artefactVersion = "netgov/2.44"
 
 // artefactRepo is the canonical home of this source. The commit is read from the build stamp.
 const artefactRepo = "github:pixmix/netgov"
@@ -378,6 +378,20 @@ type Rule struct {
 	Note string `json:"note,omitempty"`
 }
 
+// Pin is a PATTERN-PROOF destination pin (2.44). Pins live in their own state section
+// that no pat-* path reads or writes: pattern activation replaces st.Rules wholesale —
+// measured on the NB 2026-11-05, where a venue-profile edit rewrote rules to null and
+// silently disarmed all fifteen model-API pins. Every plan build merges Pins regardless
+// of the active pattern, and — unlike rules, which skip a dead uplink silently — a pin
+// whose uplink is not live realises as UNREACHABLE: fail-closed, "no connection or the
+// pinned path", never a silent fall-through to the default egress.
+type Pin struct {
+	Domain string `json:"domain"`
+	Via    string `json:"via"`
+	Fam    string `json:"fam,omitempty"` // "4" | "6" | "both"/""
+	Note   string `json:"note,omitempty"`
+}
+
 // AP is a NAMED access-point definition (NM `ipv4.method shared`: DHCP+NAT, clients egress
 // via the host default). The AP card is a LIBRARY of these; defining one does NOT activate
 // it. Patterns reference APs BY NAME and bring them up on activation. `On` = currently
@@ -418,6 +432,8 @@ type State struct {
 	Uplinks   []Uplink `json:"uplinks"`
 	APs       []AP     `json:"aps,omitempty"`
 	Rules     []Rule   `json:"rules"`
+	Pins      []Pin    `json:"pins,omitempty"`     // pattern-proof store — pat-* NEVER reads or rewrites this
+	PinsOff   bool     `json:"pins_off,omitempty"` // operator switch: true = pins excluded from every build
 	DefaultV4 string   `json:"default_v4,omitempty"` // uplink | "block" | ""
 	DefaultV6 string   `json:"default_v6,omitempty"`
 	WebAddr   string   `json:"web_addr,omitempty"`
@@ -1202,7 +1218,8 @@ func dhcpRouter(dev string) string {
 	return ""
 }
 
-func resolveFam(domain, fam string) []string {
+// resolveFam is a var so tests can stub DNS (2.44); production behaviour unchanged.
+var resolveFam = func(domain, fam string) []string {
 	r := &net.Resolver{}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
@@ -1225,7 +1242,9 @@ func resolveFam(domain, fam string) []string {
 	return out
 }
 
-func uplinkLive(u Uplink, fam string) (src, gw string, live bool) {
+// uplinkLive is a var so tests can stub liveness without faking sysfs (2.44,
+// same seam pattern as resolveFam); production behaviour unchanged.
+var uplinkLive = func(u Uplink, fam string) (src, gw string, live bool) {
 	if !devExists(u.Dev) || !devOperUp(u.Dev) {
 		return "", "", false
 	}
@@ -1366,6 +1385,31 @@ func planFamily(st *State, fam string) (clean, build [][]string) {
 			seenIP[ip] = true
 			build = append(build, ipfam(fam, "rule", "add", "to", ip, "table", itoa(t), "priority", itoa(pri)))
 			pri++
+		}
+	}
+
+	// pins (2.44): the pattern-proof store, merged into EVERY build regardless of the
+	// active pattern — and FAIL-CLOSED: a pin whose uplink is dead or unknown realises
+	// against the block table (unreachable), never a silent skip. Rules above keep their
+	// historical skip semantics; pins are the no-leak contract (operator directive
+	// 2026-11-04: model traffic is "either no connection or through the funnel").
+	if !st.PinsOff {
+		for _, p := range st.Pins {
+			if p.Domain == "" || !famMatch(p.Fam, fam) {
+				continue
+			}
+			t, ok := tableOrBlock(p.Via)
+			if !ok {
+				t = tableBlock // dead/unknown uplink => unreachable (fail-closed)
+			}
+			for _, ip := range resolveFam(p.Domain, fam) {
+				if pri >= priSrcPin || seenIP[ip] {
+					continue
+				}
+				seenIP[ip] = true
+				build = append(build, ipfam(fam, "rule", "add", "to", ip, "table", itoa(t), "priority", itoa(pri)))
+				pri++
+			}
 		}
 	}
 
@@ -1897,6 +1941,39 @@ func cmdStatus(st *State) {
 		}
 		fmt.Printf("  %-26s -> %-8s [%s] %s\n", r.Domain, r.Via, dash(r.Fam), strings.Join(resolveFam(r.Domain, "4"), " "))
 	}
+	if len(st.Pins) > 0 || st.PinsOff {
+		fmt.Println("PINS (pattern-proof; fail-closed; pat-* never rewrites these)")
+		if st.PinsOff {
+			fmt.Println("  DISABLED (`netgov pin on` re-enables)")
+		}
+		for _, p := range st.Pins {
+			mark := "UNREACHABLE (fail-closed: uplink not live)"
+			if p.Via == blockVia {
+				mark = "block (explicit)"
+			} else {
+				for _, u := range st.Uplinks {
+					if u.Name != p.Via {
+						continue
+					}
+					if _, _, l := uplinkLive(u, "4"); l {
+						mark = "live"
+					} else if _, _, l6 := uplinkLive(u, "6"); l6 {
+						mark = "live (v6)"
+					}
+				}
+			}
+			note := ""
+			if p.Note != "" {
+				note = "  # " + p.Note
+			}
+			fmt.Printf("  %-40s -> %-8s [%s] %s%s\n", p.Domain, p.Via, dash(p.Fam), mark, note)
+		}
+		sw := "on"
+		if st.PinsOff {
+			sw = "off"
+		}
+		fmt.Printf("  %d pin(s), pins %s\n", len(st.Pins), sw)
+	}
 	fmt.Println("SOURCE RULES (containers/VMs/custom -> uplink)")
 	for _, r := range st.Rules {
 		if r.From == "" {
@@ -2105,6 +2182,8 @@ func main() {
 		cmdAP(st, rest)
 	case "rule":
 		cmdRule(st, rest)
+	case "pin":
+		cmdPin(st, rest)
 	case "default":
 		cmdDefault(st, rest)
 	case "pat-list", "pat-set", "pat-del", "pat-apply":
@@ -2296,6 +2375,79 @@ func cmdRule(st *State, args []string) {
 		fmt.Println("rule removed")
 	default:
 		fmt.Println("usage: netgov rule [list|add ...|del ...]")
+	}
+}
+
+// cmdPin (2.44) — the pattern-proof pin store. Same verb shapes as cmdRule on
+// purpose; the differences are the whole point: pins survive every pat-* rewrite,
+// and a pin whose uplink is down realises as unreachable instead of vanishing.
+func cmdPin(st *State, args []string) {
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	switch args[0] {
+	case "list":
+		if st.PinsOff {
+			fmt.Println("  (pins DISABLED — `netgov pin on` re-enables)")
+		}
+		for _, p := range st.Pins {
+			note := ""
+			if p.Note != "" {
+				note = "  # " + p.Note
+			}
+			fmt.Printf("  %-40s -> %-8s [%s]%s\n", p.Domain, p.Via, dash(p.Fam), note)
+		}
+		sw := "on"
+		if st.PinsOff {
+			sw = "off"
+		}
+		fmt.Printf("  %d pin(s), pins %s\n", len(st.Pins), sw)
+	case "add":
+		dom, _ := flagVal(args, "--domain")
+		via, _ := flagVal(args, "--via")
+		fam, _ := flagVal(args, "--fam")
+		note, _ := flagVal(args, "--note")
+		if dom == "" || via == "" {
+			fmt.Println("usage: netgov pin add --domain <host> --via <uplink|block> [--fam 4|6|both] [--note ...]")
+			os.Exit(2)
+		}
+		if fam == "" {
+			fam = "both"
+		}
+		var keep []Pin
+		for _, p := range st.Pins {
+			if p.Domain == dom {
+				continue // replace-by-domain, same semantics as rule add
+			}
+			keep = append(keep, p)
+		}
+		st.Pins = append(keep, Pin{Domain: dom, Via: via, Fam: fam, Note: note})
+		must(saveState(st, statePath()))
+		fmt.Println("pin added (pattern-proof; fail-closed if the uplink goes down) — `netgov apply` to realise")
+	case "del":
+		dom, _ := flagVal(args, "--domain")
+		if dom == "" {
+			fmt.Println("usage: netgov pin del --domain <host>")
+			os.Exit(2)
+		}
+		var keep []Pin
+		n := 0
+		for _, p := range st.Pins {
+			if p.Domain == dom {
+				n++
+				continue
+			}
+			keep = append(keep, p)
+		}
+		st.Pins = keep
+		must(saveState(st, statePath()))
+		fmt.Printf("pin removed (%d) — `netgov apply` to realise\n", n)
+	case "on", "off":
+		st.PinsOff = args[0] == "off"
+		must(saveState(st, statePath()))
+		fmt.Println("pins", args[0], "— `netgov apply` to realise")
+	default:
+		fmt.Println("usage: netgov pin [list|add --domain <host> --via <u|block>|del --domain <host>|on|off]")
 	}
 }
 
@@ -2664,6 +2816,9 @@ func cmdPattern(st *State, verb string, args []string) {
 			p.V4 = st.DefaultV4
 			p.V6 = st.DefaultV6
 			p.Rules = append([]Rule(nil), st.Rules...)
+			// DELIBERATE: st.Pins is NOT snapshotted (2.44). Pins are layer state, not
+			// pattern state — a pattern that carried them could rewrite or drop them on
+			// activation, which is the exact defect the pin store exists to prevent.
 		}
 		if v, ok := flagVal(args, "--v4"); ok {
 			p.V4 = v
@@ -2800,6 +2955,9 @@ const usageText = `netgov — host multi-homing / policy-routing switchboard
   ap    list | save <name> --dev <i> --ssid <s> --psk <p> [--band bg|a] [--channel N] | on <name> | off <name> | del <name>
   link  list|up <name>|down <name>|reapply <dev>   (reapply = restore link to NM profile)
   rule  add (--domain <d>|--from <cidr|iface>) --via <u|block> [--fam 4|6|both] | del | list
+  pin   add --domain <host> --via <u|block> [--fam 4|6|both] [--note ..] | del | list | on | off
+                        pattern-proof pins (2.44): survive every pat-* rewrite; FAIL-CLOSED —
+                        a pin whose uplink is down realises as unreachable, never silent direct
   default set [--v4 <u>] [--v6 <u|block>] | clear
   apply | refresh                              realise state (sudo -A)
   reset                                        flush all netgov rules -> restore NM baseline (sudo -A)
